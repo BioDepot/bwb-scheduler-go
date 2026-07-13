@@ -1,5 +1,14 @@
 # Biodepot Scheduler
 
+## Repository Lineage
+
+`BioDepot/bwb-scheduler-go` is the BioDepot-maintained home of the Go
+scheduler. The `agentCompat` branch includes Patrick McKeever's upstream
+`agentCompat` history through `f948d22` plus reviewed BioDepot integration
+fixes. The `patrick/agentCompat` branch preserves the unmodified upstream head,
+and `https://github.com/Patrick-McKeever/bwb_scheduler.git` is tracked as the
+read-only `upstream` remote in maintained checkouts.
+
 ## Description
 This scheduler is based on Temporal.io workflow framework with key modifications to optimize bioinformatics workflows. We support a hybrid architecture across cloud, HPC, and local servers. Asynchronous execution is also supported to reduce execution time. This workflow has been tested using bulk RNA-seq datasets.
 
