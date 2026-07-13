@@ -169,12 +169,17 @@ func getAncListsWithPrefixHelper(
 	if len(intermediateAncIds) == 0 {
 		if candidate {
 			for runId := range nodeExec.outputs {
-				newList := append(baseList, runId)
+				newList := append(slices.Clone(baseList), runId)
 				out = append(out, newList)
 			}
 		} else {
+			runIds := make([]int, 0, len(nodeExec.succs[succId]))
 			for runId := range nodeExec.succs[succId] {
-				newList := append(baseList, runId)
+				runIds = append(runIds, runId)
+			}
+			slices.Sort(runIds)
+			for _, runId := range runIds {
+				newList := append(slices.Clone(baseList), runId)
 				out = append(out, newList)
 			}
 		}
@@ -182,8 +187,14 @@ func getAncListsWithPrefixHelper(
 	}
 
 	nextAncId := intermediateAncIds[0]
-	for runId, succRun := range nodeExec.succs[nextAncId] {
-		newList := append(baseList, runId)
+	runIds := make([]int, 0, len(nodeExec.succs[nextAncId]))
+	for runId := range nodeExec.succs[nextAncId] {
+		runIds = append(runIds, runId)
+	}
+	slices.Sort(runIds)
+	for _, runId := range runIds {
+		succRun := nodeExec.succs[nextAncId][runId]
+		newList := append(slices.Clone(baseList), runId)
 		descAncLists := getAncListsWithPrefixHelper(
 			succRun, newList, intermediateAncIds[1:],
 			asyncNodeId, succId, candidate,

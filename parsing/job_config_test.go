@@ -63,6 +63,26 @@ func TestConfigsValidation(t *testing.T) {
 	}
 }
 
+func TestSlurmEnvironmentValidation(t *testing.T) {
+	valid := []byte(`{
+		"executors": {"slurm": {"ip_addr":"127.0.0.1","transfer_addr":"127.0.0.1","user":"me","sched_dir":"/root/123"}},
+		"configs": {"cfg1": {"executor":"slurm","annotations":{"partition":"normal","environment":{"APPTAINERENV_CUDA_VISIBLE_DEVICES":"1"}}}},
+		"node_configs": {"1":"cfg1"}
+	}`)
+	if _, err := ParseAndValidateJobConfig(valid); err != nil {
+		t.Fatalf("expected valid environment, got error: %v", err)
+	}
+
+	invalidName := []byte(`{
+		"executors": {"slurm": {"ip_addr":"127.0.0.1","transfer_addr":"127.0.0.1","user":"me","sched_dir":"/root/123"}},
+		"configs": {"cfg1": {"executor":"slurm","annotations":{"partition":"normal","environment":{"BAD-NAME":"1"}}}},
+		"node_configs": {"1":"cfg1"}
+	}`)
+	if _, err := ParseAndValidateJobConfig(invalidName); err == nil {
+		t.Fatal("expected invalid environment variable name to fail")
+	}
+}
+
 func TestNodeConfigsValidation(t *testing.T) {
 	valid := []byte(`{
 		"executors": {"slurm": {"ip_addr":"127.0.0.1","transfer_addr":"127.0.0.1","user":"me","sched_dir":"/root/123"}},

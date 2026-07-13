@@ -67,9 +67,14 @@ func resolveExplicitHostPath(executorRoot, declaredPath string) string {
 
 func (cmdMan *CmdManager) GetImageNames() []string {
 	imageNames := make([]string, 0)
+	seen := make(map[string]struct{})
 	nodes := cmdMan.state.workflow.GetNodes()
 	for _, node := range nodes {
 		imageName := fmt.Sprintf("%s:%s", node.GetImageName(), node.GetImageTag())
+		if _, exists := seen[imageName]; exists {
+			continue
+		}
+		seen[imageName] = struct{}{}
 		imageNames = append(imageNames, imageName)
 	}
 	return imageNames

@@ -26,15 +26,16 @@ type SshConfig struct {
 }
 
 type SlurmJobConfig struct {
-    MaxRetries  *int      `json:"max_retries,omitempty"`
-    Mem         *string   `json:"mem,omitempty"`
-    CpusPerTask *int      `json:"cpus_per_task,omitempty"`
-    Gpus        *string   `json:"gpus,omitempty"`
-    Nodes       *int      `json:"nodes,omitempty"`
-    Ntasks      *int      `json:"ntasks,omitempty"`
-    Time        *string   `json:"time,omitempty"`
-    Partition   *string   `json:"partition,omitempty"`
-    Modules     *[]string `json:"modules,omitempty"`
+    MaxRetries  *int              `json:"max_retries,omitempty"`
+    Mem         *string           `json:"mem,omitempty"`
+    CpusPerTask *int              `json:"cpus_per_task,omitempty"`
+    Gpus        *string           `json:"gpus,omitempty"`
+    Nodes       *int              `json:"nodes,omitempty"`
+    Ntasks      *int              `json:"ntasks,omitempty"`
+    Time        *string           `json:"time,omitempty"`
+    Partition   *string           `json:"partition,omitempty"`
+    Modules     *[]string         `json:"modules,omitempty"`
+    Environment map[string]string `json:"environment,omitempty"`
 }
 
 type LocalJobConfig struct {
@@ -368,6 +369,15 @@ func (jd *RawJobConfig) validateAnnotations(
     if slurmConfig.Time != nil {
         if err := validateWalltimeStr(*slurmConfig.Time); err != nil {
             return err
+        }
+    }
+
+    for key, value := range slurmConfig.Environment {
+        if matched, _ := regexp.MatchString(`^[A-Za-z_][A-Za-z0-9_]*$`, key); !matched {
+            return fmt.Errorf("invalid Slurm environment variable name %q", key)
+        }
+        if strings.ContainsAny(value, "\r\n") {
+            return fmt.Errorf("Slurm environment variable %q contains a newline", key)
         }
     }
 

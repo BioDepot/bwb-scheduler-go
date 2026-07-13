@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -243,6 +244,18 @@ func WriteSbatchFile(
 	if jobConfig.Modules != nil {
 		for _, module := range *jobConfig.Modules {
 			fmt.Fprintf(outStream, "module load %s\n", module)
+		}
+	}
+
+	if len(jobConfig.Environment) > 0 {
+		keys := make([]string, 0, len(jobConfig.Environment))
+		for key := range jobConfig.Environment {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			value := strings.ReplaceAll(jobConfig.Environment[key], "'", "'\\''")
+			fmt.Fprintf(outStream, "export %s='%s'\n", key, value)
 		}
 	}
 
@@ -665,7 +678,6 @@ func (connMan *SlurmActivity) mkdirAll(dirs []string) error {
 	}
 	return nil
 }
-
 
 func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 	cmd parsing.CmdRunParams, jobConfig parsing.SlurmJobConfig,
