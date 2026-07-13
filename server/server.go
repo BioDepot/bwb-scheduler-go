@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"go-scheduler/fs"
@@ -19,7 +20,7 @@ type StartWorkflowRequest struct {
 	Schema           string              `json:"schema"`
 	ResolvedWorkflow json.RawMessage     `json:"resolved_workflow"`
 	WorkerInfo       workflow.WorkerInfo `json:"worker_info"`
-	Config           *parsing.JobConfig  `json:"config,omitempty"`
+	Config           json.RawMessage     `json:"config,omitempty"`
 }
 
 type StartWorkflowResponse struct {
@@ -82,6 +83,20 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+func parseRequestJobConfig(
+	raw json.RawMessage, bwbWorkflow *parsing.ResolvedWorkflow,
+) (parsing.JobConfig, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return parsing.GetDefaultConfig(bwbWorkflow, false), nil
+	}
+
+	var jobConfig parsing.JobConfig
+	if err := parsing.ParseJobConfig(raw, &jobConfig); err != nil {
+		return parsing.JobConfig{}, err
+	}
+	return jobConfig, nil
+}
+
 func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -117,11 +132,10 @@ func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var jobConfig parsing.JobConfig
-	if req.Config != nil {
-		jobConfig = *req.Config
-	} else {
-		jobConfig = parsing.GetDefaultConfig(&bwbWorkflow, false)
+	jobConfig, err := parseRequestJobConfig(req.Config, &bwbWorkflow)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid config: %s", err))
+		return
 	}
 
 	workflowOptions := client.StartWorkflowOptions{

@@ -1412,6 +1412,10 @@ func CmdToStr(template CmdTemplate) string {
 	return strings.ReplaceAll(out, "$", "\\$")
 }
 
+func shellQuoteArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
 func FormSingularityCmdPrefix(
 	template CmdTemplate,
 	volumes map[string]string,
@@ -1465,7 +1469,7 @@ func FormSingularityCmd(
 	//cmdStr = strings.ReplaceAll(cmdStr, "$", "\\$")
 
 	singularityPrefix := FormSingularityCmdPrefix(template, volumes, useGpu, sifPath)
-	fullCmd := fmt.Sprintf("%s sh -c '%s'", singularityPrefix, cmdStr)
+	fullCmd := fmt.Sprintf("%s sh -c %s", singularityPrefix, shellQuoteArg(cmdStr))
 
 	return fullCmd, envStrs
 }

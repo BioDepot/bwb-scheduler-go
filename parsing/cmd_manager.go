@@ -57,6 +57,14 @@ func NewCmdManager(
 	return cmdMan
 }
 
+func resolveExplicitHostPath(executorRoot, declaredPath string) string {
+	cleanedPath := filepath.Clean(declaredPath)
+	if cleanedPath == "/data" || strings.HasPrefix(cleanedPath, "/data/") {
+		return filepath.Join(executorRoot, cleanedPath)
+	}
+	return declaredPath
+}
+
 func (cmdMan *CmdManager) GetImageNames() []string {
 	imageNames := make([]string, 0)
 	nodes := cmdMan.state.workflow.GetNodes()
@@ -188,7 +196,7 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 
 	if abstractVols.MountRootToData {
 		vols["__general__"] = ExecVolumeMnt{
-			CntPath: "/data",
+			CntPath:  "/data",
 			HostPath: dstExecRootDir,
 			Executor: executorId,
 		}
@@ -198,12 +206,13 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 	// Explicit mounts are assumed to have host paths referencing the
 	// FS of their executor.
 	for pname, mnt := range abstractVols.ExplicitMnts {
+		hostPath := resolveExplicitHostPath(dstExecRootDir, mnt.HostPath)
 		vols[pname] = ExecVolumeMnt{
-			Executor: executorId,
-			CntPath: mnt.CntPath,
-			HostPath: mnt.HostPath,
-			TargetFileCnt: mnt.CntPath,
-			TargetFileHost: mnt.HostPath,
+			Executor:       executorId,
+			CntPath:        mnt.CntPath,
+			HostPath:       hostPath,
+			TargetFileCnt:  mnt.CntPath,
+			TargetFileHost: hostPath,
 		}
 	}
 
@@ -213,10 +222,10 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 		if executorId == propagatedHostPath.MntSrc.Executor {
 			// If generated on the same filesystem, then just use the same mount.
 			vols[pname] = ExecVolumeMnt{
-				Executor: executorId,
-				CntPath: propagatedHostPath.CntPath,
-				HostPath: propagatedHostPath.MntSrc.TargetFileHost,
-				TargetFileCnt: propagatedHostPath.MntSrc.TargetFileCnt,
+				Executor:       executorId,
+				CntPath:        propagatedHostPath.CntPath,
+				HostPath:       propagatedHostPath.MntSrc.TargetFileHost,
+				TargetFileCnt:  propagatedHostPath.MntSrc.TargetFileCnt,
 				TargetFileHost: propagatedHostPath.MntSrc.TargetFileHost,
 			}
 		} else {
@@ -231,7 +240,7 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 			// of the output file itself.
 			var hostPath string
 			if abstractVols.MountRootToData && strings.HasPrefix(propagatedHostPath.CntPath, "/data") {
-				hostPath = filepath.Join(dstExecRootDir, strings.TrimLeft(propagatedHostPath.CntPath, "/data")) 
+				hostPath = filepath.Join(dstExecRootDir, strings.TrimLeft(propagatedHostPath.CntPath, "/data"))
 			} else {
 				hostPath = filepath.Join(dstExecRootDir, propagatedHostPath.CntPath)
 			}
@@ -242,10 +251,10 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 				DstHostPath: hostPath,
 			})
 			vols[pname] = ExecVolumeMnt{
-				Executor: executorId,
-				CntPath: propagatedHostPath.CntPath,
-				HostPath: hostPath,
-				TargetFileCnt: propagatedHostPath.CntPath,
+				Executor:       executorId,
+				CntPath:        propagatedHostPath.CntPath,
+				HostPath:       hostPath,
+				TargetFileCnt:  propagatedHostPath.CntPath,
 				TargetFileHost: hostPath,
 			}
 		}
@@ -266,10 +275,10 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 		parentHostDir := filepath.Join(dstExecRootDir, parentCntDir)
 		targetFileHost := filepath.Join(dstExecRootDir, cntOutFile)
 		vols[pname] = ExecVolumeMnt{
-			Executor: executorId,
-			CntPath: parentCntDir,
-			HostPath: parentHostDir,
-			TargetFileCnt: cntOutFile,
+			Executor:       executorId,
+			CntPath:        parentCntDir,
+			HostPath:       parentHostDir,
+			TargetFileCnt:  cntOutFile,
 			TargetFileHost: targetFileHost,
 		}
 		dirsToCreate = append(dirsToCreate, parentHostDir)
@@ -278,10 +287,10 @@ func (cmdMan *CmdManager) getCmdVolumesAndXfers(
 	for pname, cntOutDir := range abstractVols.OutputDirs {
 		hostOutDir := filepath.Join(dstExecRootDir, cntOutDir)
 		vols[pname] = ExecVolumeMnt{
-			Executor: executorId,
-			CntPath: cntOutDir,
-			HostPath: hostOutDir,
-			TargetFileCnt: cntOutDir,
+			Executor:       executorId,
+			CntPath:        cntOutDir,
+			HostPath:       hostOutDir,
+			TargetFileCnt:  cntOutDir,
 			TargetFileHost: hostOutDir,
 		}
 		dirsToCreate = append(dirsToCreate, hostOutDir)
@@ -328,25 +337,25 @@ func (cmdMan *CmdManager) getCmdsFromParams(
 			}
 
 			for i := range nodeCmds {
-			    cmdId := cmdMan.currentMaxCmdId
-			    nodeCmds[i].Id = cmdId
-			    nodeCmds[i].Priority = cmdMan.state.index.MaxDistanceFromSink[nodeId]
-			    cmdMan.cmdIdToParams[cmdId] = paramSet
-			    cmdMan.remainingIters[nodeId][nodeRunId][cmdId] = struct{}{}
-			    cmdMan.currentMaxCmdId += 1
+				cmdId := cmdMan.currentMaxCmdId
+				nodeCmds[i].Id = cmdId
+				nodeCmds[i].Priority = cmdMan.state.index.MaxDistanceFromSink[nodeId]
+				cmdMan.cmdIdToParams[cmdId] = paramSet
+				cmdMan.remainingIters[nodeId][nodeRunId][cmdId] = struct{}{}
+				cmdMan.currentMaxCmdId += 1
 
-			    vols, xfers, dirsToCreate, err := cmdMan.getCmdVolumesAndXfers(executorId, volumes[i])
-			    if err != nil {
-			        return nil, fmt.Errorf("error creating vols: %s", err)
-			    }
-			
-			    ret[nodeId] = append(ret[nodeId], CmdRunParams{
-			        Cmd:              nodeCmds[i],
-			        Volumes:          vols,
-			        Xfers:            xfers,
-			        HostDirsToCreate: dirsToCreate,
-			    })
-			    cmdMan.cmdIdToVolumes[cmdId] = vols
+				vols, xfers, dirsToCreate, err := cmdMan.getCmdVolumesAndXfers(executorId, volumes[i])
+				if err != nil {
+					return nil, fmt.Errorf("error creating vols: %s", err)
+				}
+
+				ret[nodeId] = append(ret[nodeId], CmdRunParams{
+					Cmd:              nodeCmds[i],
+					Volumes:          vols,
+					Xfers:            xfers,
+					HostDirsToCreate: dirsToCreate,
+				})
+				cmdMan.cmdIdToVolumes[cmdId] = vols
 			}
 
 			if len(nodeCmds) == 0 {

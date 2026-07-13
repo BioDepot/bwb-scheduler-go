@@ -156,7 +156,7 @@ See `serverIntegrationTest.py` for a full example of setting up workers, startin
 
 ### Notes
 
-- `config` in `/start_workflow` is optional; if omitted, a default config is generated from the workflow.
+- `config` in `/start_workflow` is optional; if omitted, a default config is generated from the workflow. When present, it uses the same `executors` / `configs` / `node_configs` JSON format accepted by the CLI config file.
 - `run_id` in `/stop_workflow` and `/workflow_status` is optional; if omitted, the latest run for the given `workflow_id` is used.
 - `node_statuses` in `/workflow_status` is `null` when the workflow has reached a terminal status, since completed or failed workflows cannot be queried.
 
