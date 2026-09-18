@@ -29,6 +29,22 @@ import (
 
 type ByteSize int64
 
+func temporalClientOptions(logger *slog.Logger) client.Options {
+	hostPort := strings.TrimSpace(os.Getenv("BWB_TEMPORAL_ADDRESS"))
+	if hostPort == "" {
+		hostPort = "localhost:7233"
+	}
+	namespace := strings.TrimSpace(os.Getenv("BWB_TEMPORAL_NAMESPACE"))
+	if namespace == "" {
+		namespace = "default"
+	}
+	return client.Options{
+		HostPort:  hostPort,
+		Namespace: namespace,
+		Logger:    temporalLog.NewStructuredLogger(logger),
+	}
+}
+
 func (b *ByteSize) String() string {
 	return fmt.Sprintf("%d", *b)
 }
@@ -254,10 +270,7 @@ func runWorkflowTemporal(
 ) error {
 	var err error
 
-	c, err := client.NewLazyClient(client.Options{
-		HostPort: "localhost:7233",
-		Logger:   temporalLog.NewStructuredLogger(logger),
-	})
+	c, err := client.NewLazyClient(temporalClientOptions(logger))
 	if err != nil {
 		return fmt.Errorf("unable to create Temporal client: %s", err)
 	}
@@ -662,10 +675,7 @@ func main() {
 				&slog.HandlerOptions{Level: slogLevel},
 			))
 
-			c, err := client.NewLazyClient(client.Options{
-				HostPort: "localhost:7233",
-				Logger:   temporalLog.NewStructuredLogger(logger),
-			})
+			c, err := client.NewLazyClient(temporalClientOptions(logger))
 			if err != nil {
 				return fmt.Errorf("unable to create Temporal client: %s", err)
 			}

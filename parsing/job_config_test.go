@@ -83,6 +83,43 @@ func TestSlurmEnvironmentValidation(t *testing.T) {
 	}
 }
 
+func TestExtendedSlurmSiteProfileValidation(t *testing.T) {
+	valid := []byte(`{
+		"executors": {"slurm": {
+			"ip_addr":"cluster.example.org", "command_port":2222,
+			"transfer_addr":"transfer.example.org", "transfer_port":22,
+			"user":"me", "sched_dir":"/ocean/project/scheduler",
+			"known_hosts_file":"/home/me/.ssh/known_hosts",
+			"expected_host_key_fingerprint":"SHA256:abc",
+			"project_filesystem_roots":["/ocean/project"],
+			"allowed_transfer_roots":["/ocean/project"],
+			"container_runtime":"apptainer"
+		}},
+		"configs": {"cfg1": {"executor":"slurm","annotations":{
+			"partition":"RM-shared", "account":"project-1", "qos":"normal",
+			"reservation":"reserved-1", "time":"00:30:00", "nodes":1,
+			"ntasks":2, "tasks_per_node":2, "cpus_per_task":8, "mem":"32G", "gpus":"1"
+		}}},
+		"node_configs": {"1":"cfg1"}
+	}`)
+	config, err := ParseAndValidateJobConfig(valid)
+	if err != nil {
+		t.Fatalf("extended site profile rejected: %v", err)
+	}
+	if config.SlurmExecutor.CommandEndpoint() != "cluster.example.org:2222" ||
+		config.SlurmExecutor.ContainerRuntime != "apptainer" {
+		t.Fatalf("extended executor fields were not retained: %#v", config.SlurmExecutor)
+	}
+
+	unknown := []byte(`{
+		"executors": {"slurm": {"ip_addr":"host","transfer_addr":"host","user":"me","sched_dir":"/root","proxy_jump":"unsupported"}},
+		"configs": {}, "node_configs": {}
+	}`)
+	if _, err := ParseAndValidateJobConfig(unknown); err == nil {
+		t.Fatal("unsupported site-profile field was silently accepted")
+	}
+}
+
 func TestNodeConfigsValidation(t *testing.T) {
 	valid := []byte(`{
 		"executors": {"slurm": {"ip_addr":"127.0.0.1","transfer_addr":"127.0.0.1","user":"me","sched_dir":"/root/123"}},
@@ -128,60 +165,59 @@ func TestInvalidJSON(t *testing.T) {
 	}
 }
 
-
 func TestValidateTime(t *testing.T) {
-    minutes := "123"
-    if err := validateWalltimeStr(minutes); err != nil {
-        t.Fatalf("incorrectly rejected [minutes] time string")
-    }
+	minutes := "123"
+	if err := validateWalltimeStr(minutes); err != nil {
+		t.Fatalf("incorrectly rejected [minutes] time string")
+	}
 
-    minutesSeconds := "123:22"
-    if err := validateWalltimeStr(minutesSeconds); err != nil {
-        t.Fatalf("incorrectly rejected [minutes:seconds] time string")
-    }
-    minutesSecondsOverflow := "123:221"
-    if err := validateWalltimeStr(minutesSecondsOverflow); err == nil {
-        t.Fatalf("incorrectly accepted overflowing [minutes:seconds] time string")
-    }
+	minutesSeconds := "123:22"
+	if err := validateWalltimeStr(minutesSeconds); err != nil {
+		t.Fatalf("incorrectly rejected [minutes:seconds] time string")
+	}
+	minutesSecondsOverflow := "123:221"
+	if err := validateWalltimeStr(minutesSecondsOverflow); err == nil {
+		t.Fatalf("incorrectly accepted overflowing [minutes:seconds] time string")
+	}
 
-    hoursMinutesSeconds := "12:23:22"
-    if err := validateWalltimeStr(hoursMinutesSeconds); err != nil {
-        t.Fatalf("incorrectly rejected [hours:minutes:seconds] time string")
-    }
+	hoursMinutesSeconds := "12:23:22"
+	if err := validateWalltimeStr(hoursMinutesSeconds); err != nil {
+		t.Fatalf("incorrectly rejected [hours:minutes:seconds] time string")
+	}
 
-    hoursMinutesSecondsOverflow := "12:23:221"
-    if err := validateWalltimeStr(hoursMinutesSecondsOverflow); err == nil {
-        t.Fatalf("incorrectly accepted overflowing [hours:minutes:seconds] time string")
-    }
+	hoursMinutesSecondsOverflow := "12:23:221"
+	if err := validateWalltimeStr(hoursMinutesSecondsOverflow); err == nil {
+		t.Fatalf("incorrectly accepted overflowing [hours:minutes:seconds] time string")
+	}
 
-    daysHours := "12-12"
-    if err := validateWalltimeStr(daysHours); err != nil {
-        t.Fatalf("incorrectly rejected [days-hours] time string")
-    }
+	daysHours := "12-12"
+	if err := validateWalltimeStr(daysHours); err != nil {
+		t.Fatalf("incorrectly rejected [days-hours] time string")
+	}
 
-    daysHoursMinutes := "12-12:12"
-    if err := validateWalltimeStr(daysHoursMinutes); err != nil {
-        t.Fatalf("incorrectly rejected [days-hours:minutes] time string")
-    }
-    daysHoursMinutesOverflow := "12-12:121"
-    if err := validateWalltimeStr(daysHoursMinutesOverflow); err == nil {
-        t.Fatalf("incorrectly accepted overflowing [days-hours:minutes] time string")
-    }
+	daysHoursMinutes := "12-12:12"
+	if err := validateWalltimeStr(daysHoursMinutes); err != nil {
+		t.Fatalf("incorrectly rejected [days-hours:minutes] time string")
+	}
+	daysHoursMinutesOverflow := "12-12:121"
+	if err := validateWalltimeStr(daysHoursMinutesOverflow); err == nil {
+		t.Fatalf("incorrectly accepted overflowing [days-hours:minutes] time string")
+	}
 
-    daysHoursMinutesSeconds := "12-12:12:12"
-    if err := validateWalltimeStr(daysHoursMinutesSeconds); err != nil {
-        t.Fatalf("incorrectly rejected [days-hours:minutes:seconds] time string")
-    }
+	daysHoursMinutesSeconds := "12-12:12:12"
+	if err := validateWalltimeStr(daysHoursMinutesSeconds); err != nil {
+		t.Fatalf("incorrectly rejected [days-hours:minutes:seconds] time string")
+	}
 
-    daysHoursMinutesSecondsOverflow := "12-12:12:121"
-    if err := validateWalltimeStr(daysHoursMinutesSecondsOverflow); err == nil {
-        t.Fatalf("incorrectly accepted overflowing [days-hours:minutes:seconds] time string")
-    }
+	daysHoursMinutesSecondsOverflow := "12-12:12:121"
+	if err := validateWalltimeStr(daysHoursMinutesSecondsOverflow); err == nil {
+		t.Fatalf("incorrectly accepted overflowing [days-hours:minutes:seconds] time string")
+	}
 
-    invalidStr := "12h00"
-    if err := validateWalltimeStr(invalidStr); err == nil {
-        t.Fatalf("incorrectly accepted invalid time str %s", invalidStr)
-    }
+	invalidStr := "12h00"
+	if err := validateWalltimeStr(invalidStr); err == nil {
+		t.Fatalf("incorrectly accepted invalid time str %s", invalidStr)
+	}
 }
 
 func TestOverallParsing(t *testing.T) {
@@ -190,7 +226,7 @@ func TestOverallParsing(t *testing.T) {
 		"configs": {"cfg1": {"executor":"slurm","annotations":{"partition": "123"}}},
 		"node_configs": {"1":"cfg1"}
 	}`)
-    _, err := ParseAndValidateJobConfig(valid)
+	_, err := ParseAndValidateJobConfig(valid)
 	if err != nil {
 		t.Errorf("expected valid node_configs, got error: %v", err)
 	}

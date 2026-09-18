@@ -2,6 +2,10 @@ package workflow
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"go-scheduler/fs"
 	"go-scheduler/parsing"
@@ -9,11 +13,13 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"go.temporal.io/sdk/activity"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 	"golang.org/x/crypto/ssh"
@@ -49,12 +55,64 @@ var JOB_CODES = map[string]struct {
 
 type SlurmJob struct {
 	CmdId             int
+	NodeId            int
 	TmpOutputHostPath string
 	ExpOutFilePnames  []string
 	JobId             string
 	SbatchPath        string
 	OutPath           string
 	ErrPath           string
+	CorrelationKey    string
+	BatchSHA256       string
+	SubmittedAt       string
+	SubmissionSource  string
+}
+
+type SlurmCancellationRequest struct {
+	JobIDs          []string
+	CorrelationKeys []string
+	ManifestPath    string
+	User            string
+}
+
+type SlurmCancellationEvidence struct {
+	RequestedJobIDs     []string              `json:"requested_job_ids"`
+	RecoveredJobIDs     []string              `json:"recovered_job_ids,omitempty"`
+	CorrelationKeys     []string              `json:"correlation_keys,omitempty"`
+	VerifiedTerminalIDs []string              `json:"verified_terminal_ids"`
+	LastObservedJobIDs  []string              `json:"last_observed_job_ids,omitempty"`
+	ManifestPath        string                `json:"manifest_path,omitempty"`
+	SubmittingUser      string                `json:"submitting_user,omitempty"`
+	CleanupStatus       string                `json:"cleanup_status"`
+	Verified            bool                  `json:"verified"`
+	StartedAt           string                `json:"started_at,omitempty"`
+	VerifiedAt          string                `json:"verified_at,omitempty"`
+	Error               string                `json:"error,omitempty"`
+	Attempts            []SlurmCleanupAttempt `json:"attempts,omitempty"`
+	DryRun              bool                  `json:"dry_run,omitempty"`
+	Jobs                []SlurmJobEvidence    `json:"jobs,omitempty"`
+}
+
+type SlurmJobEvidence struct {
+	JobID             string   `json:"job_id"`
+	CommandID         int      `json:"command_id"`
+	NodeID            int      `json:"node_id"`
+	Attempt           int      `json:"attempt"`
+	CorrelationKey    string   `json:"correlation_key"`
+	SchedulerState    string   `json:"scheduler_state,omitempty"`
+	ExitCode          string   `json:"exit_code,omitempty"`
+	BatchSHA256       string   `json:"batch_sha256,omitempty"`
+	SubmissionSource  string   `json:"submission_source,omitempty"`
+	SubmittedAt       string   `json:"submitted_at,omitempty"`
+	DeclaredArtifacts []string `json:"declared_artifacts,omitempty"`
+}
+
+type SlurmCleanupAttempt struct {
+	Attempt        int      `json:"attempt"`
+	ObservedJobIDs []string `json:"observed_job_ids,omitempty"`
+	Action         string   `json:"action"`
+	Timestamp      string   `json:"timestamp"`
+	Error          string   `json:"error,omitempty"`
 }
 
 type GetOutputsFuture struct {
@@ -77,6 +135,10 @@ type SlurmState struct {
 	StorageId             string
 	MaxSlurmBatchId       int
 	FinalErr              error
+	Identity              parsing.ExecutionIdentity
+	SubmissionSequence    int
+	ContinueAsNewAfter    int
+	JobEvidence           map[string]SlurmJobEvidence
 }
 
 type SlurmActivity struct {
@@ -93,8 +155,10 @@ type CmdOut struct {
 }
 
 type SlurmRequest struct {
-	Cmd    parsing.CmdRunParams
-	Config parsing.SlurmJobConfig
+	Cmd            parsing.CmdRunParams
+	Config         parsing.SlurmJobConfig
+	CorrelationKey string
+	Sequence       int
 }
 
 type SlurmResponse struct {
@@ -110,7 +174,7 @@ type rawJobOutputs struct {
 }
 
 func GetTemporalSshQueueName(config parsing.SshConfig) string {
-	return fmt.Sprintf("%s@%s", config.User, config.IpAddr)
+	return fmt.Sprintf("%s@%s", config.User, config.CommandEndpoint())
 }
 
 func (connMan *SlurmActivity) ensureConnected() (*ssh.Client, error) {
@@ -129,7 +193,7 @@ func (connMan *SlurmActivity) ensureConnected() (*ssh.Client, error) {
 		return connMan.Client, nil
 	}
 
-	client, err := ssh.Dial("tcp", connMan.Config.IpAddr, connMan.ConnConfig)
+	client, err := ssh.Dial("tcp", connMan.Config.CommandEndpoint(), connMan.ConnConfig)
 	if err != nil {
 		return nil, err
 	}
@@ -199,18 +263,33 @@ func (connMan *SlurmActivity) ExecCmd(cmd string) (CmdOut, error) {
 func WriteSbatchFile(
 	outStream io.Writer, cmd parsing.CmdTemplate, volumes map[string]string,
 	slurmConfig parsing.SshConfig, jobConfig parsing.SlurmJobConfig,
-	slurmDir, imageDir, jobSlurmId string,
+	slurmDir, imageDir, jobSlurmId, correlationKey string,
 ) (string, string, error) {
 	outBasePath := fmt.Sprintf("%s.out", jobSlurmId)
 	errBasePath := fmt.Sprintf("%s.err", jobSlurmId)
 	outPath := filepath.Join(slurmDir, outBasePath)
 	errPath := filepath.Join(slurmDir, errBasePath)
 	fmt.Fprintln(outStream, "#!/bin/bash")
+	if correlationKey != "" {
+		if !slurmCorrelationPattern.MatchString(correlationKey) {
+			return "", "", fmt.Errorf("invalid Slurm correlation key %q", correlationKey)
+		}
+		fmt.Fprintf(outStream, "#SBATCH --job-name=%s\n", correlationKey)
+	}
 	fmt.Fprintf(outStream, "#SBATCH --output=%s\n", outPath)
 	fmt.Fprintf(outStream, "#SBATCH --error=%s\n", errPath)
 
 	if jobConfig.Partition != nil {
 		fmt.Fprintf(outStream, "#SBATCH --partition=%s\n", *jobConfig.Partition)
+	}
+	if jobConfig.Account != nil {
+		fmt.Fprintf(outStream, "#SBATCH --account=%s\n", *jobConfig.Account)
+	}
+	if jobConfig.QOS != nil {
+		fmt.Fprintf(outStream, "#SBATCH --qos=%s\n", *jobConfig.QOS)
+	}
+	if jobConfig.Reservation != nil {
+		fmt.Fprintf(outStream, "#SBATCH --reservation=%s\n", *jobConfig.Reservation)
 	}
 
 	if jobConfig.Time != nil {
@@ -219,6 +298,9 @@ func WriteSbatchFile(
 
 	if jobConfig.Ntasks != nil {
 		fmt.Fprintf(outStream, "#SBATCH --ntasks=%d\n", *jobConfig.Ntasks)
+	}
+	if jobConfig.TasksPerNode != nil {
+		fmt.Fprintf(outStream, "#SBATCH --ntasks-per-node=%d\n", *jobConfig.TasksPerNode)
 	}
 
 	if jobConfig.Nodes != nil {
@@ -264,6 +346,9 @@ func WriteSbatchFile(
 	cmdStr, envs := parsing.FormSingularityCmd(
 		cmd, volumes, localSifPath, useGpu,
 	)
+	if slurmConfig.ContainerRuntime == "apptainer" {
+		cmdStr = strings.Replace(cmdStr, "singularity exec", "apptainer exec", 1)
+	}
 	fmt.Fprintf(outStream, "%s %s", strings.Join(envs, " "), cmdStr)
 	fmt.Printf("Writing sbatch w/ cmd %s %s\n", strings.Join(envs, " "), cmdStr)
 
@@ -332,6 +417,36 @@ func RunSacct(
 // shellQuote wraps s in single quotes and escapes any embedded single quotes.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
+func pathWithinRoots(path string, roots []string) bool {
+	cleanPath := filepath.Clean(path)
+	for _, root := range roots {
+		rel, err := filepath.Rel(root, cleanPath)
+		if err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateRemoteJobPaths(
+	cmd parsing.CmdRunParams, slurmDir, imageDir string, roots []string,
+) error {
+	if len(roots) == 0 {
+		return nil
+	}
+	paths := []string{slurmDir, imageDir}
+	paths = append(paths, cmd.HostDirsToCreate...)
+	for _, volume := range cmd.Volumes {
+		paths = append(paths, volume.HostPath)
+	}
+	for _, path := range paths {
+		if !filepath.IsAbs(path) || !pathWithinRoots(path, roots) {
+			return fmt.Errorf("remote path %q is outside configured project filesystem roots", path)
+		}
+	}
+	return nil
 }
 
 // randomToken generates a 16-character hex string used as the section
@@ -628,6 +743,343 @@ func (connMan *SlurmActivity) PollRemoteSlurmActivity(
 	)
 }
 
+var slurmJobIDPattern = regexp.MustCompile(`^[0-9]+(?:_[0-9]+)?$`)
+var slurmCorrelationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func normalizeSlurmJobIDs(jobIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(jobIDs))
+	for _, rawID := range jobIDs {
+		jobID := strings.TrimSpace(rawID)
+		if !slurmJobIDPattern.MatchString(jobID) {
+			return nil, fmt.Errorf("invalid Slurm job ID %q", rawID)
+		}
+		seen[jobID] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for jobID := range seen {
+		result = append(result, jobID)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func recoverManifestJobIDs(
+	request SlurmCancellationRequest, runCmd CmdRunner,
+) ([]string, error) {
+	if request.ManifestPath == "" || len(request.CorrelationKeys) == 0 {
+		return nil, nil
+	}
+	for _, key := range request.CorrelationKeys {
+		if !slurmCorrelationPattern.MatchString(key) {
+			return nil, fmt.Errorf("invalid Slurm correlation key %q", key)
+		}
+	}
+	cmd := fmt.Sprintf(
+		"if [ -f %s ]; then cat -- %s; fi",
+		shellQuote(request.ManifestPath), shellQuote(request.ManifestPath),
+	)
+	out, err := runCmd(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading Slurm submission manifest: %w", err)
+	}
+	keys := make(map[string]struct{}, len(request.CorrelationKeys))
+	for _, key := range request.CorrelationKeys {
+		keys[key] = struct{}{}
+	}
+	var recovered []string
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		fields := strings.Split(line, "\t")
+		// The current durable manifest has nine columns. Accept the original
+		// two-column form as well so cleanup can recover jobs created before the
+		// identity fields were added.
+		if len(fields) < 2 {
+			continue
+		}
+		if _, ok := keys[fields[0]]; ok {
+			recovered = append(recovered, fields[1])
+		}
+	}
+	return normalizeSlurmJobIDs(recovered)
+}
+
+func queryOwnedActiveSlurmJobs(
+	request SlurmCancellationRequest, candidateIDs []string, runCmd CmdRunner,
+) ([]string, error) {
+	if request.User == "" {
+		return nil, fmt.Errorf("Slurm cancellation requires a submitting user")
+	}
+	out, err := runCmd(fmt.Sprintf(
+		"squeue --noheader --user=%s --format=%s",
+		shellQuote(request.User), shellQuote("%A|%j"),
+	))
+	if err != nil {
+		return nil, fmt.Errorf("failed querying active Slurm jobs: %w", err)
+	}
+	candidates := make(map[string]struct{}, len(candidateIDs))
+	for _, jobID := range candidateIDs {
+		candidates[jobID] = struct{}{}
+	}
+	keys := make(map[string]struct{}, len(request.CorrelationKeys))
+	for _, key := range request.CorrelationKeys {
+		keys[key] = struct{}{}
+	}
+	active := make([]string, 0)
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "|", 2)
+		if len(fields) != 2 || !slurmJobIDPattern.MatchString(fields[0]) {
+			continue
+		}
+		_, idMatch := candidates[fields[0]]
+		_, keyMatch := keys[fields[1]]
+		if idMatch || keyMatch {
+			active = append(active, fields[0])
+		}
+	}
+	return normalizeSlurmJobIDs(active)
+}
+
+func cancelSlurmJobs(
+	request SlurmCancellationRequest,
+	runCmd CmdRunner,
+	sleep func(time.Duration),
+	maxAttempts int,
+) (SlurmCancellationEvidence, error) {
+	requested, err := normalizeSlurmJobIDs(request.JobIDs)
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	request.CorrelationKeys = append([]string(nil), request.CorrelationKeys...)
+	sort.Strings(request.CorrelationKeys)
+	evidence := SlurmCancellationEvidence{
+		RequestedJobIDs: requested,
+		CorrelationKeys: request.CorrelationKeys,
+		ManifestPath:    request.ManifestPath,
+		SubmittingUser:  request.User,
+		CleanupStatus:   "canceling_slurm",
+		StartedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	allIDs := append([]string(nil), requested...)
+	requestedSet := make(map[string]struct{}, len(requested))
+	for _, jobID := range requested {
+		requestedSet[jobID] = struct{}{}
+	}
+
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	minimumReconciliationAttempts := 1
+	if len(request.CorrelationKeys) > 0 {
+		minimumReconciliationAttempts = min(3, maxAttempts)
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		attemptEvidence := SlurmCleanupAttempt{
+			Attempt:   attempt + 1,
+			Action:    "inspect",
+			Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
+		}
+		recovered, recoverErr := recoverManifestJobIDs(request, runCmd)
+		if recoverErr != nil {
+			attemptEvidence.Error = recoverErr.Error()
+			evidence.Attempts = append(evidence.Attempts, attemptEvidence)
+			return evidence, recoverErr
+		}
+		allIDs = append(allIDs, recovered...)
+		allIDs, err = normalizeSlurmJobIDs(allIDs)
+		if err != nil {
+			return evidence, err
+		}
+		active, queryErr := queryOwnedActiveSlurmJobs(request, allIDs, runCmd)
+		if queryErr != nil {
+			attemptEvidence.Error = queryErr.Error()
+			evidence.Attempts = append(evidence.Attempts, attemptEvidence)
+			return evidence, queryErr
+		}
+		attemptEvidence.ObservedJobIDs = append([]string(nil), active...)
+		evidence.LastObservedJobIDs = append([]string(nil), active...)
+		if len(active) > 0 {
+			attemptEvidence.Action = "scancel"
+			quotedIDs := make([]string, len(active))
+			for i, jobID := range active {
+				quotedIDs[i] = shellQuote(jobID)
+			}
+			cancelOut, cancelErr := runCmd("scancel -- " + strings.Join(quotedIDs, " "))
+			if cancelErr != nil {
+				err := fmt.Errorf(
+					"scancel failed with exit code %d and stderr %s: %w",
+					cancelOut.ExitCode, cancelOut.StdErr, cancelErr,
+				)
+				attemptEvidence.Error = err.Error()
+				evidence.Attempts = append(evidence.Attempts, attemptEvidence)
+				return evidence, err
+			}
+		}
+		evidence.Attempts = append(evidence.Attempts, attemptEvidence)
+		if len(active) == 0 && attempt+1 >= minimumReconciliationAttempts {
+			evidence.RecoveredJobIDs = make([]string, 0)
+			for _, jobID := range allIDs {
+				if _, originallyRequested := requestedSet[jobID]; !originallyRequested {
+					evidence.RecoveredJobIDs = append(evidence.RecoveredJobIDs, jobID)
+				}
+			}
+			evidence.VerifiedTerminalIDs = allIDs
+			evidence.CleanupStatus = "verified"
+			evidence.Verified = true
+			evidence.VerifiedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			evidence.LastObservedJobIDs = nil
+			return evidence, nil
+		}
+		sleep(time.Second)
+	}
+	return evidence, fmt.Errorf("Slurm jobs remained active after %d cleanup attempts", maxAttempts)
+}
+
+func (connMan *SlurmActivity) CancelRemoteSlurmJobsActivity(
+	request SlurmCancellationRequest,
+) (SlurmCancellationEvidence, error) {
+	failureMarker := strings.TrimSpace(os.Getenv("BWB_TEST_FAIL_SLURM_CLEANUP_FILE"))
+	if failureMarker != "" {
+		if !filepath.IsAbs(failureMarker) {
+			return SlurmCancellationEvidence{}, fmt.Errorf("BWB_TEST_FAIL_SLURM_CLEANUP_FILE must be absolute")
+		}
+		if _, statErr := os.Stat(failureMarker); os.IsNotExist(statErr) {
+			evidence, inspectErr := inspectSlurmJobs(request, func(cmd string) (CmdOut, error) {
+				return connMan.ExecCmd(cmd)
+			})
+			if inspectErr != nil {
+				evidence.Error = redactOperationalError(inspectErr.Error())
+			}
+			evidence.DryRun = false
+			evidence.Verified = false
+			evidence.CleanupStatus = "failed"
+			evidence.Error = "injected Slurm cleanup failure"
+			if err := os.WriteFile(failureMarker, []byte("injected\n"), 0600); err != nil {
+				return SlurmCancellationEvidence{}, err
+			}
+			return evidence, nil
+		} else if statErr != nil {
+			return SlurmCancellationEvidence{}, statErr
+		}
+	}
+	evidence, err := cancelSlurmJobs(request, func(cmd string) (CmdOut, error) {
+		return connMan.ExecCmd(cmd)
+	}, time.Sleep, 30)
+	if err != nil {
+		evidence.CleanupStatus = "failed"
+		evidence.Verified = false
+		evidence.Error = redactOperationalError(err.Error())
+		// Cleanup failure is domain evidence, not an activity transport failure.
+		return evidence, nil
+	}
+	return evidence, nil
+}
+
+func inspectSlurmJobs(
+	request SlurmCancellationRequest, runCmd CmdRunner,
+) (SlurmCancellationEvidence, error) {
+	requested, err := normalizeSlurmJobIDs(request.JobIDs)
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	recovered, err := recoverManifestJobIDs(request, runCmd)
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	allIDs, err := normalizeSlurmJobIDs(append(append([]string(nil), requested...), recovered...))
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	active, err := queryOwnedActiveSlurmJobs(request, allIDs, runCmd)
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	requestedSet := make(map[string]struct{}, len(requested))
+	for _, jobID := range requested {
+		requestedSet[jobID] = struct{}{}
+	}
+	recoveredOnly := make([]string, 0)
+	for _, jobID := range allIDs {
+		if _, ok := requestedSet[jobID]; !ok {
+			recoveredOnly = append(recoveredOnly, jobID)
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	return SlurmCancellationEvidence{
+		RequestedJobIDs:    requested,
+		RecoveredJobIDs:    recoveredOnly,
+		CorrelationKeys:    append([]string(nil), request.CorrelationKeys...),
+		LastObservedJobIDs: active,
+		ManifestPath:       request.ManifestPath,
+		SubmittingUser:     request.User,
+		CleanupStatus:      "dry_run",
+		Verified:           len(active) == 0,
+		StartedAt:          now,
+		VerifiedAt:         map[bool]string{true: now}[len(active) == 0],
+		VerifiedTerminalIDs: func() []string {
+			if len(active) == 0 {
+				return allIDs
+			}
+			return nil
+		}(),
+		DryRun: true,
+		Attempts: []SlurmCleanupAttempt{{
+			Attempt:        1,
+			ObservedJobIDs: active,
+			Action:         "inspect",
+			Timestamp:      now,
+		}},
+	}, nil
+}
+
+func (connMan *SlurmActivity) ReconcileRemoteSlurmJobsActivity(
+	request SlurmCancellationRequest, apply bool,
+) (SlurmCancellationEvidence, error) {
+	runCmd := func(cmd string) (CmdOut, error) { return connMan.ExecCmd(cmd) }
+	if !apply {
+		evidence, err := inspectSlurmJobs(request, runCmd)
+		if err != nil {
+			evidence.CleanupStatus = "failed"
+			evidence.Error = redactOperationalError(err.Error())
+			return evidence, nil
+		}
+		return evidence, nil
+	}
+	evidence, err := cancelSlurmJobs(request, runCmd, time.Sleep, 30)
+	if err != nil {
+		evidence.CleanupStatus = "failed"
+		evidence.Error = redactOperationalError(err.Error())
+		return evidence, nil
+	}
+	return evidence, nil
+}
+
+func SlurmReconciliationWorkflow(
+	ctx workflow.Context, config parsing.SshConfig,
+	request SlurmCancellationRequest, apply bool,
+) (SlurmCancellationEvidence, error) {
+	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		TaskQueue:           GetTemporalSshQueueName(config),
+		StartToCloseTimeout: 2 * time.Minute,
+		RetryPolicy: &temporal.RetryPolicy{
+			MaximumAttempts: 3,
+		},
+	})
+	var evidence SlurmCancellationEvidence
+	var a SlurmActivity
+	err := workflow.ExecuteActivity(
+		activityCtx, a.ReconcileRemoteSlurmJobsActivity, request, apply,
+	).Get(activityCtx, &evidence)
+	return evidence, err
+}
+
+func redactOperationalError(detail string) string {
+	for _, marker := range []string{"Bearer ", "token=", "password=", "secret="} {
+		if index := strings.Index(strings.ToLower(detail), strings.ToLower(marker)); index >= 0 {
+			return detail[:index] + "[REDACTED]"
+		}
+	}
+	return detail
+}
+
 // mkdirIfNotExists is retained as a single-directory fallback utility.
 func (connMan *SlurmActivity) mkdirIfNotExists(dir string) error {
 	lsCmd := fmt.Sprintf("ls -1 %s", dir)
@@ -680,10 +1132,20 @@ func (connMan *SlurmActivity) mkdirAll(dirs []string) error {
 }
 
 func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
+	ctx context.Context,
 	cmd parsing.CmdRunParams, jobConfig parsing.SlurmJobConfig,
-	fs fs.SshFS, slurmDir, imageDir string,
+	correlationKey string, fs fs.SshFS, slurmDir, imageDir string,
+	identity parsing.ExecutionIdentity,
 ) (SlurmJob, error) {
-	jobSlurmId := randomString(16)
+	if !slurmCorrelationPattern.MatchString(correlationKey) {
+		return SlurmJob{}, fmt.Errorf("invalid Slurm correlation key %q", correlationKey)
+	}
+	jobSlurmId := correlationKey
+	if err := validateRemoteJobPaths(
+		cmd, slurmDir, imageDir, connMan.Config.ProjectFilesystemRoots,
+	); err != nil {
+		return SlurmJob{}, err
+	}
 	tmpOutputHostPath := filepath.Join(slurmDir, jobSlurmId)
 
 	// Create all required remote directories in a single SSH call.
@@ -706,7 +1168,7 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 			sbatchLocalPath, err,
 		)
 	}
-	defer tmpFile.Close()
+	defer os.Remove(sbatchLocalPath)
 
 	volumes := getSlurmVolumes(cmd, tmpOutputHostPath)
 	fmt.Println()
@@ -715,20 +1177,46 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 	fmt.Println()
 	outPath, errPath, err := WriteSbatchFile(
 		tmpFile, cmd.Cmd, volumes, connMan.Config, jobConfig, slurmDir, imageDir, jobSlurmId,
+		correlationKey,
 	)
 	if err != nil {
 		return SlurmJob{}, fmt.Errorf("error writing sbatch file: %s", err)
 	}
 
-	tmpFile.Sync()
-	if err := fs.Upload(sbatchLocalPath, sbatchRemotePath); err != nil {
+	if err := tmpFile.Sync(); err != nil {
+		tmpFile.Close()
+		return SlurmJob{}, fmt.Errorf("failed syncing sbatch file %s: %w", sbatchLocalPath, err)
+	}
+	if err := tmpFile.Close(); err != nil {
+		return SlurmJob{}, fmt.Errorf("failed closing sbatch file %s: %w", sbatchLocalPath, err)
+	}
+	batchContents, err := os.ReadFile(sbatchLocalPath)
+	if err != nil {
+		return SlurmJob{}, fmt.Errorf("failed reading sbatch file %s: %w", sbatchLocalPath, err)
+	}
+	batchSum := sha256.Sum256(batchContents)
+	batchSHA256 := hex.EncodeToString(batchSum[:])
+	candidateRemotePath := sbatchRemotePath + ".candidate." + batchSHA256
+	if err := fs.Upload(sbatchLocalPath, candidateRemotePath); err != nil {
 		return SlurmJob{}, fmt.Errorf(
 			"unable to upload sbatch file from %s to %s: %s",
-			sbatchLocalPath, sbatchRemotePath, err,
+			sbatchLocalPath, candidateRemotePath, err,
 		)
 	}
 
-	sbatchCmd := fmt.Sprintf("sbatch --parsable %s", sbatchRemotePath)
+	manifestPath := filepath.Join(slurmDir, "submissions.tsv")
+	lockPath := manifestPath + ".lock"
+	sbatchCmd := buildSubmissionTransactionScript(slurmSubmissionTransaction{
+		CorrelationKey:       correlationKey,
+		SubmittingUser:       connMan.Config.User,
+		ManifestPath:         manifestPath,
+		LockPath:             lockPath,
+		SbatchPath:           sbatchRemotePath,
+		CandidatePath:        candidateRemotePath,
+		BatchSHA256:          batchSHA256,
+		Identity:             identity,
+		ReconciliationWindow: "now-1day",
+	})
 	sbatchOut, err := connMan.ExecCmd(sbatchCmd)
 	if err != nil {
 		return SlurmJob{}, fmt.Errorf(
@@ -737,18 +1225,226 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 		)
 	}
 
-	// sbatch --parsable output is either "JOBID" or "JOBID;CLUSTER".
-	jobIdRaw := strings.Split(sbatchOut.StdOut, ";")[0]
-	jobId := strings.TrimSuffix(jobIdRaw, "\n")
+	fields := strings.Split(strings.TrimSpace(sbatchOut.StdOut), "\t")
+	jobId := ""
+	submissionSource := ""
+	submittedAt := ""
+	if len(fields) > 0 {
+		jobId = strings.TrimSpace(strings.Split(fields[0], ";")[0])
+	}
+	if len(fields) > 1 {
+		submissionSource = strings.TrimSpace(fields[1])
+	}
+	if len(fields) > 2 {
+		submittedAt = strings.TrimSpace(fields[2])
+	}
+	if !slurmJobIDPattern.MatchString(jobId) {
+		return SlurmJob{}, fmt.Errorf("sbatch returned invalid job ID %q", jobId)
+	}
+	if err := pauseAfterDurableSubmission(ctx, correlationKey, jobId, submissionSource); err != nil {
+		return SlurmJob{}, err
+	}
 	return SlurmJob{
 		CmdId:             cmd.Cmd.Id,
+		NodeId:            cmd.Cmd.NodeId,
 		JobId:             jobId,
 		TmpOutputHostPath: tmpOutputHostPath,
 		ExpOutFilePnames:  cmd.Cmd.OutFilePnames,
 		SbatchPath:        sbatchRemotePath,
 		OutPath:           outPath,
 		ErrPath:           errPath,
+		CorrelationKey:    correlationKey,
+		BatchSHA256:       batchSHA256,
+		SubmittedAt:       submittedAt,
+		SubmissionSource:  submissionSource,
 	}, nil
+}
+
+type slurmSubmissionTransaction struct {
+	CorrelationKey       string
+	SubmittingUser       string
+	ManifestPath         string
+	LockPath             string
+	SbatchPath           string
+	CandidatePath        string
+	BatchSHA256          string
+	Identity             parsing.ExecutionIdentity
+	ReconciliationWindow string
+}
+
+func buildSubmissionTransactionScript(tx slurmSubmissionTransaction) string {
+	values := []struct {
+		name  string
+		value string
+	}{
+		{"correlation_key", tx.CorrelationKey},
+		{"submitting_user", tx.SubmittingUser},
+		{"manifest_path", tx.ManifestPath},
+		{"lock_path", tx.LockPath},
+		{"sbatch_path", tx.SbatchPath},
+		{"candidate_path", tx.CandidatePath},
+		{"batch_sha256", tx.BatchSHA256},
+		{"request_id", tx.Identity.RequestID},
+		{"workflow_id", tx.Identity.WorkflowID},
+		{"workbench_run_id", tx.Identity.WorkbenchRunID},
+		{"executor_id", tx.Identity.ExecutorID},
+		{"site_profile_id", tx.Identity.SiteProfileID},
+		{"reconciliation_window", tx.ReconciliationWindow},
+	}
+	var script strings.Builder
+	script.WriteString("set -euo pipefail\n")
+	for _, value := range values {
+		fmt.Fprintf(&script, "%s=%s\n", value.name, shellQuote(value.value))
+	}
+	script.WriteString(`
+manifest_tmp="${manifest_path}.tmp.$$"
+cleanup_submission_transaction() {
+  rm -f -- "$candidate_path" "$manifest_tmp"
+}
+trap cleanup_submission_transaction EXIT
+exec 9>"$lock_path"
+flock -x 9
+
+persist_manifest_record() {
+  job_id_to_persist=$1
+  submitted_at_to_persist=$2
+  if [ -f "$manifest_path" ]; then
+    awk -F '\t' -v key="$correlation_key" '$1 != key {print}' "$manifest_path" > "$manifest_tmp"
+  else
+    : > "$manifest_tmp"
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$correlation_key" "$job_id_to_persist" "$batch_sha256" "$request_id" \
+    "$workflow_id" "$workbench_run_id" "$executor_id" "$site_profile_id" \
+    "$submitted_at_to_persist" >> "$manifest_tmp"
+  mv -- "$manifest_tmp" "$manifest_path"
+}
+
+candidate_hash=$(sha256sum -- "$candidate_path" | awk '{print $1}')
+if [ "$candidate_hash" != "$batch_sha256" ]; then
+  printf 'candidate batch hash mismatch\n' >&2
+  exit 71
+fi
+if [ -f "$sbatch_path" ]; then
+  installed_hash=$(sha256sum -- "$sbatch_path" | awk '{print $1}')
+  if [ "$installed_hash" != "$batch_sha256" ]; then
+    printf 'installed batch hash mismatch for %s\n' "$correlation_key" >&2
+    exit 72
+  fi
+else
+  mv -- "$candidate_path" "$sbatch_path"
+fi
+
+record=$(awk -F '\t' -v key="$correlation_key" '$1 == key {print; exit}' "$manifest_path" 2>/dev/null || true)
+if [ -n "$record" ]; then
+  job_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $2}')
+  if [[ ! "$job_id" =~ ^[0-9]+(_[0-9]+)?$ ]]; then
+    printf 'manifest contains invalid Slurm job ID for %s\n' "$correlation_key" >&2
+    exit 73
+  fi
+  recorded_hash=$(printf '%s\n' "$record" | awk -F '\t' '{print $3}')
+  if [ -n "$recorded_hash" ] && [ "$recorded_hash" != "$batch_sha256" ]; then
+    printf 'manifest batch hash mismatch for %s\n' "$correlation_key" >&2
+    exit 73
+  fi
+  if [ -n "$recorded_hash" ]; then
+    recorded_request_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $4}')
+    recorded_workflow_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $5}')
+    recorded_workbench_run_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $6}')
+    recorded_executor_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $7}')
+    recorded_site_profile_id=$(printf '%s\n' "$record" | awk -F '\t' '{print $8}')
+    if [ "$recorded_request_id" != "$request_id" ] || \
+       [ "$recorded_workflow_id" != "$workflow_id" ] || \
+       [ "$recorded_workbench_run_id" != "$workbench_run_id" ] || \
+       [ "$recorded_executor_id" != "$executor_id" ] || \
+       [ "$recorded_site_profile_id" != "$site_profile_id" ]; then
+      printf 'manifest execution identity mismatch for %s\n' "$correlation_key" >&2
+      exit 75
+    fi
+    submitted_at=$(printf '%s\n' "$record" | awk -F '\t' '{print $9}')
+  else
+    submitted_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    persist_manifest_record "$job_id" "$submitted_at"
+  fi
+  printf '%s\tmanifest\t%s\n' "$job_id" "$submitted_at"
+  exit 0
+fi
+
+queue_rows=$(squeue --noheader --user="$submitting_user" --format='%A|%j|%u')
+account_rows=$(sacct -X -S "$reconciliation_window" -u "$submitting_user" -n -P -o JobIDRaw,JobName,User)
+matches=$(
+  printf '%s\n%s\n' "$queue_rows" "$account_rows" |
+    awk -F '|' -v key="$correlation_key" -v user="$submitting_user" \
+      '$2 == key && $3 == user && $1 ~ /^[0-9]+(_[0-9]+)?$/ {print $1}' |
+    sort -u
+)
+match_count=$(printf '%s\n' "$matches" | awk 'NF {n++} END {print n+0}')
+if [ "$match_count" -gt 1 ]; then
+  printf 'multiple Slurm jobs match correlation key %s: %s\n' "$correlation_key" "$matches" >&2
+  exit 74
+fi
+if [ "$match_count" -eq 1 ]; then
+  job_id=$(printf '%s\n' "$matches" | awk 'NF {print; exit}')
+  submission_source=recovered
+else
+  raw=$(sbatch --parsable "$sbatch_path")
+  job_id=${raw%%;*}
+  submission_source=submitted
+fi
+if [[ ! "$job_id" =~ ^[0-9]+(_[0-9]+)?$ ]]; then
+  printf 'scheduler returned invalid Slurm job ID for %s\n' "$correlation_key" >&2
+  exit 76
+fi
+submitted_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+persist_manifest_record "$job_id" "$submitted_at"
+printf '%s\t%s\t%s\n' "$job_id" "$submission_source" "$submitted_at"
+`)
+	return "bash -s << 'BWB_SLURM_SUBMIT_EOF'\n" + script.String() + "BWB_SLURM_SUBMIT_EOF"
+}
+
+func pauseAfterDurableSubmission(
+	ctx context.Context, correlationKey, jobID, submissionSource string,
+) error {
+	hookPath := strings.TrimSpace(os.Getenv("BWB_TEST_PAUSE_AFTER_SLURM_SUBMIT_FILE"))
+	if hookPath == "" || submissionSource != "submitted" {
+		return nil
+	}
+	if !filepath.IsAbs(hookPath) {
+		return fmt.Errorf("BWB_TEST_PAUSE_AFTER_SLURM_SUBMIT_FILE must be absolute")
+	}
+	payload, err := json.Marshal(map[string]string{
+		"correlation_key": correlationKey,
+		"job_id":          jobID,
+		"state":           "submitted_durable",
+	})
+	if err != nil {
+		return err
+	}
+	readyPath := hookPath + ".ready"
+	tmpPath := readyPath + ".tmp"
+	if err := os.WriteFile(tmpPath, append(payload, '\n'), 0600); err != nil {
+		return fmt.Errorf("failed writing submission fault-hook evidence: %w", err)
+	}
+	if err := os.Rename(tmpPath, readyPath); err != nil {
+		return fmt.Errorf("failed publishing submission fault-hook evidence: %w", err)
+	}
+	releasePath := hookPath + ".release"
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(releasePath); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("failed checking submission fault-hook release: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			// The activity heartbeat makes a live worker loss observable promptly.
+			activity.RecordHeartbeat(ctx, correlationKey, jobID)
+		}
+	}
 }
 
 func ProcessSacctResult(
@@ -766,6 +1462,10 @@ func ProcessSacctResult(
 			)
 			return
 		}
+		evidence := state.JobEvidence[jobId]
+		evidence.SchedulerState = result.State
+		evidence.ExitCode = result.ExitCode
+		state.JobEvidence[jobId] = evidence
 
 		if JOB_CODES[result.State].done {
 			if JOB_CODES[result.State].failed {
@@ -855,17 +1555,22 @@ func NotifyCmdCompletion(
 			)
 			return
 		}
+		var signalFuture workflow.Future
 		if JOB_CODES[result.State].failed {
 			jobErr := fmt.Sprintf("job failed with err %s", output.StdErr)
-			workflow.SignalExternalWorkflow(
+			signalFuture = workflow.SignalExternalWorkflow(
 				ctx, state.ParentWfId, "", "slurm-response",
 				SlurmResponse{Result: output, Error: &jobErr},
 			)
 		} else {
-			workflow.SignalExternalWorkflow(
+			signalFuture = workflow.SignalExternalWorkflow(
 				ctx, state.ParentWfId, "", "slurm-response",
 				SlurmResponse{Result: output, Error: nil},
 			)
+		}
+		if err := signalFuture.Get(ctx, nil); err != nil {
+			state.FinalErr = fmt.Errorf("failed notifying parent workflow: %w", err)
+			return
 		}
 	}
 }
@@ -880,23 +1585,60 @@ func StartSlurmJob(
 		TaskQueue:           GetTemporalSshQueueName(state.SlurmConfig),
 		StartToCloseTimeout: time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts:    1,
+			MaximumAttempts:    2,
 			BackoffCoefficient: 4,
 		},
+		HeartbeatTimeout: 5 * time.Second,
 	}
 	childCtx := workflow.WithActivityOptions(ctx, ao)
 	slurmDir := filepath.Join(state.SchedDir, "slurm")
 	imageDir := filepath.Join(state.SchedDir, "images")
+	attempt := state.NumRetries[req.Cmd.Cmd.Id] + 1
+	correlationKey := req.CorrelationKey
+	if attempt > 1 {
+		correlationKey = fmt.Sprintf("%s-r%d", correlationKey, attempt)
+	}
 	err := workflow.ExecuteActivity(
 		childCtx, a.StartRemoteSlurmJobActivity, req.Cmd,
-		req.Config, state.SlurmFS, slurmDir, imageDir,
+		req.Config, correlationKey, state.SlurmFS, slurmDir, imageDir,
+		state.Identity,
 	).Get(ctx, &job)
 
 	if err != nil {
 		state.FinalErr = err
+		return
 	}
 
 	state.RunningJobs[job.JobId] = job
+	state.JobEvidence[job.JobId] = SlurmJobEvidence{
+		JobID:             job.JobId,
+		CommandID:         job.CmdId,
+		NodeID:            job.NodeId,
+		Attempt:           attempt,
+		CorrelationKey:    job.CorrelationKey,
+		SchedulerState:    "SUBMITTED",
+		BatchSHA256:       job.BatchSHA256,
+		SubmissionSource:  job.SubmissionSource,
+		SubmittedAt:       job.SubmittedAt,
+		DeclaredArtifacts: append([]string(nil), job.ExpOutFilePnames...),
+	}
+}
+
+func sortedSlurmJobEvidence(records map[string]SlurmJobEvidence) []SlurmJobEvidence {
+	result := make([]SlurmJobEvidence, 0, len(records))
+	for _, record := range records {
+		result = append(result, record)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CommandID != result[j].CommandID {
+			return result[i].CommandID < result[j].CommandID
+		}
+		if result[i].Attempt != result[j].Attempt {
+			return result[i].Attempt < result[j].Attempt
+		}
+		return result[i].JobID < result[j].JobID
+	})
+	return result
 }
 
 func PollSlurm(ctx workflow.Context, selector workflow.Selector, state *SlurmState) {
@@ -904,6 +1646,7 @@ func PollSlurm(ctx workflow.Context, selector workflow.Selector, state *SlurmSta
 	for jobId := range state.RunningJobs {
 		runningJobIds = append(runningJobIds, jobId)
 	}
+	sort.Strings(runningJobIds)
 
 	var a SlurmActivity
 	var jobRes map[string]SacctResult
@@ -927,7 +1670,82 @@ func PollSlurm(ctx workflow.Context, selector workflow.Selector, state *SlurmSta
 	ProcessSacctResult(ctx, selector, state, jobRes)
 }
 
-func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
+func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) (retErr error) {
+	defer func() {
+		if ctx.Err() == nil {
+			return
+		}
+		jobIDs := make([]string, 0, len(state.RunningJobs))
+		correlationSet := make(map[string]struct{})
+		for jobID, job := range state.RunningJobs {
+			jobIDs = append(jobIDs, jobID)
+			if job.CorrelationKey != "" {
+				correlationSet[job.CorrelationKey] = struct{}{}
+			}
+		}
+		for _, request := range state.Requests {
+			if request.CorrelationKey != "" {
+				correlationSet[request.CorrelationKey] = struct{}{}
+			}
+		}
+		sort.Strings(jobIDs)
+		correlationKeys := make([]string, 0, len(correlationSet))
+		for key := range correlationSet {
+			correlationKeys = append(correlationKeys, key)
+		}
+		sort.Strings(correlationKeys)
+
+		cleanupCtx, _ := workflow.NewDisconnectedContext(ctx)
+		ao := workflow.ActivityOptions{
+			TaskQueue:           GetTemporalSshQueueName(state.SlurmConfig),
+			StartToCloseTimeout: 2 * time.Minute,
+			RetryPolicy: &temporal.RetryPolicy{
+				MaximumAttempts:    3,
+				BackoffCoefficient: 2,
+			},
+		}
+		cleanupCtx = workflow.WithActivityOptions(cleanupCtx, ao)
+		request := SlurmCancellationRequest{
+			JobIDs:          jobIDs,
+			CorrelationKeys: correlationKeys,
+			ManifestPath:    filepath.Join(state.SchedDir, "slurm", "submissions.tsv"),
+			User:            state.SlurmConfig.User,
+		}
+		var evidence SlurmCancellationEvidence
+		var a SlurmActivity
+		if err := workflow.ExecuteActivity(
+			cleanupCtx, a.CancelRemoteSlurmJobsActivity, request,
+		).Get(cleanupCtx, &evidence); err != nil {
+			evidence = SlurmCancellationEvidence{
+				RequestedJobIDs: jobIDs,
+				CorrelationKeys: correlationKeys,
+				ManifestPath:    request.ManifestPath,
+				SubmittingUser:  request.User,
+				CleanupStatus:   "failed",
+				Verified:        false,
+				Error:           redactOperationalError(err.Error()),
+				StartedAt:       workflow.Now(ctx).UTC().Format(time.RFC3339Nano),
+			}
+			evidence.Jobs = sortedSlurmJobEvidence(state.JobEvidence)
+			retErr = temporal.NewCanceledError(evidence)
+			return
+		}
+		if evidence.Verified {
+			terminalSet := make(map[string]struct{}, len(evidence.VerifiedTerminalIDs))
+			for _, jobID := range evidence.VerifiedTerminalIDs {
+				terminalSet[jobID] = struct{}{}
+			}
+			for jobID, jobEvidence := range state.JobEvidence {
+				if _, ok := terminalSet[jobID]; ok && !JOB_CODES[jobEvidence.SchedulerState].done {
+					jobEvidence.SchedulerState = "CANCELLED"
+					state.JobEvidence[jobID] = jobEvidence
+				}
+			}
+		}
+		evidence.Jobs = sortedSlurmJobEvidence(state.JobEvidence)
+		retErr = temporal.NewCanceledError(evidence)
+	}()
+
 	// These should be empty at start of each workflow incarnation.
 	state.FinalErr = nil
 	state.GetOutputFutures = make(map[int]GetOutputsFuture)
@@ -945,6 +1763,9 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 	if state.Requests == nil {
 		state.Requests = make(map[int]SlurmRequest)
 	}
+	if state.JobEvidence == nil {
+		state.JobEvidence = make(map[string]SlurmJobEvidence)
+	}
 
 	selector := workflow.NewSelector(ctx)
 
@@ -952,6 +1773,10 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 	selector.AddReceive(slurmReqChan, func(c workflow.ReceiveChannel, _ bool) {
 		var pendingReq SlurmRequest
 		c.Receive(ctx, &pendingReq)
+		if pendingReq.Sequence == 0 {
+			state.SubmissionSequence++
+			pendingReq.Sequence = state.SubmissionSequence
+		}
 		state.Requests[pendingReq.Cmd.Cmd.Id] = pendingReq
 		StartSlurmJob(pendingReq, ctx, &state)
 	})
@@ -967,10 +1792,14 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 	timer := workflow.NewTimer(ctx, durationSecsAsTime)
 	selector.AddFuture(timer, timerCallback)
 
-	for workflow.GetInfo(ctx).GetCurrentHistoryLength() < 9000 {
+	historyLimit := state.ContinueAsNewAfter
+	if historyLimit <= 0 {
+		historyLimit = 9000
+	}
+	for workflow.GetInfo(ctx).GetCurrentHistoryLength() < historyLimit {
 		selector.Select(ctx)
 		if ctx.Err() != nil {
-			return nil
+			return ctx.Err()
 		}
 
 		if state.FinalErr != nil {
@@ -986,12 +1815,23 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 		if !ok {
 			break
 		}
+		if pendingReq.Sequence == 0 {
+			state.SubmissionSequence++
+			pendingReq.Sequence = state.SubmissionSequence
+		}
+		state.Requests[pendingReq.Cmd.Cmd.Id] = pendingReq
 		StartSlurmJob(pendingReq, ctx, &state)
 	}
 
 	// Drain in-flight GetOutput futures so we don't lose their callbacks
 	// along with the selector.
-	for slurmBatchInd, f := range state.GetOutputFutures {
+	batchIDs := make([]int, 0, len(state.GetOutputFutures))
+	for slurmBatchInd := range state.GetOutputFutures {
+		batchIDs = append(batchIDs, slurmBatchInd)
+	}
+	sort.Ints(batchIDs)
+	for _, slurmBatchInd := range batchIDs {
+		f := state.GetOutputFutures[slurmBatchInd]
 		f.callback(f.future)
 		delete(state.GetOutputFutures, slurmBatchInd)
 	}
