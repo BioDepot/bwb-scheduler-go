@@ -25,6 +25,28 @@ def unique_id(prefix: str) -> str:
     return f"{prefix}-{utc_stamp().lower()}-{secrets.token_hex(4)}"
 
 
+def replace_string_token(value: Any, token: str, replacement: str) -> tuple[Any, int]:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        replacements = 0
+        for key, item in value.items():
+            replaced, count = replace_string_token(item, token, replacement)
+            result[key] = replaced
+            replacements += count
+        return result, replacements
+    if isinstance(value, list):
+        result = []
+        replacements = 0
+        for item in value:
+            replaced, count = replace_string_token(item, token, replacement)
+            result.append(replaced)
+            replacements += count
+        return result, replacements
+    if isinstance(value, str):
+        return value.replace(token, replacement), value.count(token)
+    return value, 0
+
+
 def redact(value: Any) -> Any:
     if isinstance(value, dict):
         result: dict[str, Any] = {}
@@ -118,4 +140,3 @@ class ManagedProcesses:
 
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-

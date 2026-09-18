@@ -9,6 +9,7 @@ try:
     from .acceptance_lib import (
         ManagedProcesses,
         redact,
+        replace_string_token,
         require_checks,
         unique_id,
         verify_checksums,
@@ -18,6 +19,7 @@ except ImportError:
     from acceptance_lib import (
         ManagedProcesses,
         redact,
+        replace_string_token,
         require_checks,
         unique_id,
         verify_checksums,
@@ -37,6 +39,18 @@ class AcceptanceHelpersTest(unittest.TestCase):
         self.assertEqual(redact(value)["token"], "[REDACTED]")
         self.assertEqual(redact(value)["nested"]["password_value"], "[REDACTED]")
         self.assertEqual(redact(value)["nested"]["identity_file"], "/key")
+
+    def test_recursive_string_token_replacement(self) -> None:
+        replaced, count = replace_string_token(
+            {"run": "__ID__", "paths": ["/data/__ID__/out", 1]},
+            "__ID__",
+            "attempt-1",
+        )
+        self.assertEqual(count, 2)
+        self.assertEqual(
+            replaced,
+            {"run": "attempt-1", "paths": ["/data/attempt-1/out", 1]},
+        )
 
     def test_failed_preflight(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "bad"):

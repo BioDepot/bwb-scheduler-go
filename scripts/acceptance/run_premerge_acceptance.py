@@ -20,6 +20,7 @@ from typing import Any
 from acceptance_lib import (
     ManagedProcesses,
     redact,
+    replace_string_token,
     require_checks,
     unique_id,
     utc_stamp,
@@ -222,6 +223,13 @@ def observe_slurm_poller_continue_as_new(
 def materialize_request(template: Path, scenario: str, queue: str) -> dict[str, Any]:
     request = json.loads(template.read_text(encoding="utf-8"))
     suffix = unique_id(scenario)
+    request, replacement_count = replace_string_token(
+        request, "__BWB_ACCEPTANCE_ID__", suffix,
+    )
+    if replacement_count == 0:
+        raise RuntimeError(
+            "request template must use __BWB_ACCEPTANCE_ID__ in its run and output paths"
+        )
     request.update(
         request_id=f"request-{suffix}",
         workflow_id=f"workflow-{suffix}",
