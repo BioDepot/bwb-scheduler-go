@@ -14,4 +14,3 @@ docker run --rm \
 
 exec python3 "$repo_root/scripts/acceptance/run_premerge_acceptance.py" \
   --binary "$build_dir/bwbScheduler" "$@"
-
