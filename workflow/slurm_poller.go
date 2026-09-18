@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +56,25 @@ type SlurmJob struct {
 	SbatchPath        string
 	OutPath           string
 	ErrPath           string
+	CorrelationKey    string
+}
+
+type SlurmCancellationRequest struct {
+	JobIDs          []string
+	CorrelationKeys []string
+	ManifestPath    string
+	User            string
+}
+
+type SlurmCancellationEvidence struct {
+	RequestedJobIDs     []string `json:"requested_job_ids"`
+	RecoveredJobIDs     []string `json:"recovered_job_ids,omitempty"`
+	CorrelationKeys     []string `json:"correlation_keys,omitempty"`
+	VerifiedTerminalIDs []string `json:"verified_terminal_ids"`
+	CleanupStatus       string   `json:"cleanup_status"`
+	Verified            bool     `json:"verified"`
+	VerifiedAt          string   `json:"verified_at,omitempty"`
+	Error               string   `json:"error,omitempty"`
 }
 
 type GetOutputsFuture struct {
@@ -93,8 +113,9 @@ type CmdOut struct {
 }
 
 type SlurmRequest struct {
-	Cmd    parsing.CmdRunParams
-	Config parsing.SlurmJobConfig
+	Cmd            parsing.CmdRunParams
+	Config         parsing.SlurmJobConfig
+	CorrelationKey string
 }
 
 type SlurmResponse struct {
@@ -199,13 +220,19 @@ func (connMan *SlurmActivity) ExecCmd(cmd string) (CmdOut, error) {
 func WriteSbatchFile(
 	outStream io.Writer, cmd parsing.CmdTemplate, volumes map[string]string,
 	slurmConfig parsing.SshConfig, jobConfig parsing.SlurmJobConfig,
-	slurmDir, imageDir, jobSlurmId string,
+	slurmDir, imageDir, jobSlurmId, correlationKey string,
 ) (string, string, error) {
 	outBasePath := fmt.Sprintf("%s.out", jobSlurmId)
 	errBasePath := fmt.Sprintf("%s.err", jobSlurmId)
 	outPath := filepath.Join(slurmDir, outBasePath)
 	errPath := filepath.Join(slurmDir, errBasePath)
 	fmt.Fprintln(outStream, "#!/bin/bash")
+	if correlationKey != "" {
+		if !slurmCorrelationPattern.MatchString(correlationKey) {
+			return "", "", fmt.Errorf("invalid Slurm correlation key %q", correlationKey)
+		}
+		fmt.Fprintf(outStream, "#SBATCH --job-name=%s\n", correlationKey)
+	}
 	fmt.Fprintf(outStream, "#SBATCH --output=%s\n", outPath)
 	fmt.Fprintf(outStream, "#SBATCH --error=%s\n", errPath)
 
@@ -628,6 +655,181 @@ func (connMan *SlurmActivity) PollRemoteSlurmActivity(
 	)
 }
 
+var slurmJobIDPattern = regexp.MustCompile(`^[0-9]+(?:_[0-9]+)?$`)
+var slurmCorrelationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+func normalizeSlurmJobIDs(jobIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(jobIDs))
+	for _, rawID := range jobIDs {
+		jobID := strings.TrimSpace(rawID)
+		if !slurmJobIDPattern.MatchString(jobID) {
+			return nil, fmt.Errorf("invalid Slurm job ID %q", rawID)
+		}
+		seen[jobID] = struct{}{}
+	}
+	result := make([]string, 0, len(seen))
+	for jobID := range seen {
+		result = append(result, jobID)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func recoverManifestJobIDs(
+	request SlurmCancellationRequest, runCmd CmdRunner,
+) ([]string, error) {
+	if request.ManifestPath == "" || len(request.CorrelationKeys) == 0 {
+		return nil, nil
+	}
+	for _, key := range request.CorrelationKeys {
+		if !slurmCorrelationPattern.MatchString(key) {
+			return nil, fmt.Errorf("invalid Slurm correlation key %q", key)
+		}
+	}
+	cmd := fmt.Sprintf(
+		"if [ -f %s ]; then cat -- %s; fi",
+		shellQuote(request.ManifestPath), shellQuote(request.ManifestPath),
+	)
+	out, err := runCmd(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed reading Slurm submission manifest: %w", err)
+	}
+	keys := make(map[string]struct{}, len(request.CorrelationKeys))
+	for _, key := range request.CorrelationKeys {
+		keys[key] = struct{}{}
+	}
+	var recovered []string
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) != 2 {
+			continue
+		}
+		if _, ok := keys[fields[0]]; ok {
+			recovered = append(recovered, fields[1])
+		}
+	}
+	return normalizeSlurmJobIDs(recovered)
+}
+
+func queryOwnedActiveSlurmJobs(
+	request SlurmCancellationRequest, candidateIDs []string, runCmd CmdRunner,
+) ([]string, error) {
+	if request.User == "" {
+		return nil, fmt.Errorf("Slurm cancellation requires a submitting user")
+	}
+	out, err := runCmd(fmt.Sprintf(
+		"squeue --noheader --user=%s --format=%s",
+		shellQuote(request.User), shellQuote("%A|%j"),
+	))
+	if err != nil {
+		return nil, fmt.Errorf("failed querying active Slurm jobs: %w", err)
+	}
+	candidates := make(map[string]struct{}, len(candidateIDs))
+	for _, jobID := range candidateIDs {
+		candidates[jobID] = struct{}{}
+	}
+	keys := make(map[string]struct{}, len(request.CorrelationKeys))
+	for _, key := range request.CorrelationKeys {
+		keys[key] = struct{}{}
+	}
+	active := make([]string, 0)
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		fields := strings.SplitN(strings.TrimSpace(line), "|", 2)
+		if len(fields) != 2 || !slurmJobIDPattern.MatchString(fields[0]) {
+			continue
+		}
+		_, idMatch := candidates[fields[0]]
+		_, keyMatch := keys[fields[1]]
+		if idMatch || keyMatch {
+			active = append(active, fields[0])
+		}
+	}
+	return normalizeSlurmJobIDs(active)
+}
+
+func cancelSlurmJobs(
+	request SlurmCancellationRequest,
+	runCmd CmdRunner,
+	sleep func(time.Duration),
+	maxAttempts int,
+) (SlurmCancellationEvidence, error) {
+	requested, err := normalizeSlurmJobIDs(request.JobIDs)
+	if err != nil {
+		return SlurmCancellationEvidence{}, err
+	}
+	request.CorrelationKeys = append([]string(nil), request.CorrelationKeys...)
+	sort.Strings(request.CorrelationKeys)
+	evidence := SlurmCancellationEvidence{
+		RequestedJobIDs: requested,
+		CorrelationKeys: request.CorrelationKeys,
+		CleanupStatus:   "canceling_slurm",
+	}
+	allIDs := append([]string(nil), requested...)
+	requestedSet := make(map[string]struct{}, len(requested))
+	for _, jobID := range requested {
+		requestedSet[jobID] = struct{}{}
+	}
+
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	minimumReconciliationAttempts := 1
+	if len(request.CorrelationKeys) > 0 {
+		minimumReconciliationAttempts = min(3, maxAttempts)
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		recovered, recoverErr := recoverManifestJobIDs(request, runCmd)
+		if recoverErr != nil {
+			return evidence, recoverErr
+		}
+		allIDs = append(allIDs, recovered...)
+		allIDs, err = normalizeSlurmJobIDs(allIDs)
+		if err != nil {
+			return evidence, err
+		}
+		active, queryErr := queryOwnedActiveSlurmJobs(request, allIDs, runCmd)
+		if queryErr != nil {
+			return evidence, queryErr
+		}
+		if len(active) > 0 {
+			quotedIDs := make([]string, len(active))
+			for i, jobID := range active {
+				quotedIDs[i] = shellQuote(jobID)
+			}
+			cancelOut, cancelErr := runCmd("scancel -- " + strings.Join(quotedIDs, " "))
+			if cancelErr != nil {
+				return evidence, fmt.Errorf(
+					"scancel failed with exit code %d and stderr %s: %w",
+					cancelOut.ExitCode, cancelOut.StdErr, cancelErr,
+				)
+			}
+		}
+		if len(active) == 0 && attempt+1 >= minimumReconciliationAttempts {
+			evidence.RecoveredJobIDs = make([]string, 0)
+			for _, jobID := range allIDs {
+				if _, originallyRequested := requestedSet[jobID]; !originallyRequested {
+					evidence.RecoveredJobIDs = append(evidence.RecoveredJobIDs, jobID)
+				}
+			}
+			evidence.VerifiedTerminalIDs = allIDs
+			evidence.CleanupStatus = "verified"
+			evidence.Verified = true
+			evidence.VerifiedAt = time.Now().UTC().Format(time.RFC3339Nano)
+			return evidence, nil
+		}
+		sleep(time.Second)
+	}
+	return evidence, fmt.Errorf("Slurm jobs remained active after %d cleanup attempts", maxAttempts)
+}
+
+func (connMan *SlurmActivity) CancelRemoteSlurmJobsActivity(
+	request SlurmCancellationRequest,
+) (SlurmCancellationEvidence, error) {
+	return cancelSlurmJobs(request, func(cmd string) (CmdOut, error) {
+		return connMan.ExecCmd(cmd)
+	}, time.Sleep, 30)
+}
+
 // mkdirIfNotExists is retained as a single-directory fallback utility.
 func (connMan *SlurmActivity) mkdirIfNotExists(dir string) error {
 	lsCmd := fmt.Sprintf("ls -1 %s", dir)
@@ -681,9 +883,12 @@ func (connMan *SlurmActivity) mkdirAll(dirs []string) error {
 
 func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 	cmd parsing.CmdRunParams, jobConfig parsing.SlurmJobConfig,
-	fs fs.SshFS, slurmDir, imageDir string,
+	correlationKey string, fs fs.SshFS, slurmDir, imageDir string,
 ) (SlurmJob, error) {
-	jobSlurmId := randomString(16)
+	if !slurmCorrelationPattern.MatchString(correlationKey) {
+		return SlurmJob{}, fmt.Errorf("invalid Slurm correlation key %q", correlationKey)
+	}
+	jobSlurmId := correlationKey
 	tmpOutputHostPath := filepath.Join(slurmDir, jobSlurmId)
 
 	// Create all required remote directories in a single SSH call.
@@ -715,6 +920,7 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 	fmt.Println()
 	outPath, errPath, err := WriteSbatchFile(
 		tmpFile, cmd.Cmd, volumes, connMan.Config, jobConfig, slurmDir, imageDir, jobSlurmId,
+		correlationKey,
 	)
 	if err != nil {
 		return SlurmJob{}, fmt.Errorf("error writing sbatch file: %s", err)
@@ -728,7 +934,17 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 		)
 	}
 
-	sbatchCmd := fmt.Sprintf("sbatch --parsable %s", sbatchRemotePath)
+	manifestPath := filepath.Join(slurmDir, "submissions.tsv")
+	lockPath := manifestPath + ".lock"
+	sbatchCmd := fmt.Sprintf(
+		"exec 9>%s; flock -x 9; "+
+			"job_id=$(awk -F '\\t' -v key=%s '$1 == key {print $2; exit}' %s 2>/dev/null); "+
+			"if [ -z \"$job_id\" ]; then raw=$(sbatch --parsable %s) || exit $?; "+
+			"job_id=${raw%%%%;*}; printf '%%s\\t%%s\\n' %s \"$job_id\" >> %s; fi; "+
+			"printf '%%s\\n' \"$job_id\"",
+		shellQuote(lockPath), shellQuote(correlationKey), shellQuote(manifestPath),
+		shellQuote(sbatchRemotePath), shellQuote(correlationKey), shellQuote(manifestPath),
+	)
 	sbatchOut, err := connMan.ExecCmd(sbatchCmd)
 	if err != nil {
 		return SlurmJob{}, fmt.Errorf(
@@ -739,7 +955,10 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 
 	// sbatch --parsable output is either "JOBID" or "JOBID;CLUSTER".
 	jobIdRaw := strings.Split(sbatchOut.StdOut, ";")[0]
-	jobId := strings.TrimSuffix(jobIdRaw, "\n")
+	jobId := strings.TrimSpace(jobIdRaw)
+	if !slurmJobIDPattern.MatchString(jobId) {
+		return SlurmJob{}, fmt.Errorf("sbatch returned invalid job ID %q", jobId)
+	}
 	return SlurmJob{
 		CmdId:             cmd.Cmd.Id,
 		JobId:             jobId,
@@ -748,6 +967,7 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 		SbatchPath:        sbatchRemotePath,
 		OutPath:           outPath,
 		ErrPath:           errPath,
+		CorrelationKey:    correlationKey,
 	}, nil
 }
 
@@ -880,7 +1100,7 @@ func StartSlurmJob(
 		TaskQueue:           GetTemporalSshQueueName(state.SlurmConfig),
 		StartToCloseTimeout: time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
-			MaximumAttempts:    1,
+			MaximumAttempts:    2,
 			BackoffCoefficient: 4,
 		},
 	}
@@ -889,11 +1109,12 @@ func StartSlurmJob(
 	imageDir := filepath.Join(state.SchedDir, "images")
 	err := workflow.ExecuteActivity(
 		childCtx, a.StartRemoteSlurmJobActivity, req.Cmd,
-		req.Config, state.SlurmFS, slurmDir, imageDir,
+		req.Config, req.CorrelationKey, state.SlurmFS, slurmDir, imageDir,
 	).Get(ctx, &job)
 
 	if err != nil {
 		state.FinalErr = err
+		return
 	}
 
 	state.RunningJobs[job.JobId] = job
@@ -904,6 +1125,7 @@ func PollSlurm(ctx workflow.Context, selector workflow.Selector, state *SlurmSta
 	for jobId := range state.RunningJobs {
 		runningJobIds = append(runningJobIds, jobId)
 	}
+	sort.Strings(runningJobIds)
 
 	var a SlurmActivity
 	var jobRes map[string]SacctResult
@@ -927,7 +1149,58 @@ func PollSlurm(ctx workflow.Context, selector workflow.Selector, state *SlurmSta
 	ProcessSacctResult(ctx, selector, state, jobRes)
 }
 
-func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
+func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) (retErr error) {
+	defer func() {
+		if ctx.Err() == nil {
+			return
+		}
+		jobIDs := make([]string, 0, len(state.RunningJobs))
+		correlationSet := make(map[string]struct{})
+		for jobID, job := range state.RunningJobs {
+			jobIDs = append(jobIDs, jobID)
+			if job.CorrelationKey != "" {
+				correlationSet[job.CorrelationKey] = struct{}{}
+			}
+		}
+		for _, request := range state.Requests {
+			if request.CorrelationKey != "" {
+				correlationSet[request.CorrelationKey] = struct{}{}
+			}
+		}
+		sort.Strings(jobIDs)
+		correlationKeys := make([]string, 0, len(correlationSet))
+		for key := range correlationSet {
+			correlationKeys = append(correlationKeys, key)
+		}
+		sort.Strings(correlationKeys)
+
+		cleanupCtx, _ := workflow.NewDisconnectedContext(ctx)
+		ao := workflow.ActivityOptions{
+			TaskQueue:           GetTemporalSshQueueName(state.SlurmConfig),
+			StartToCloseTimeout: 2 * time.Minute,
+			RetryPolicy: &temporal.RetryPolicy{
+				MaximumAttempts:    3,
+				BackoffCoefficient: 2,
+			},
+		}
+		cleanupCtx = workflow.WithActivityOptions(cleanupCtx, ao)
+		request := SlurmCancellationRequest{
+			JobIDs:          jobIDs,
+			CorrelationKeys: correlationKeys,
+			ManifestPath:    filepath.Join(state.SchedDir, "slurm", "submissions.tsv"),
+			User:            state.SlurmConfig.User,
+		}
+		var evidence SlurmCancellationEvidence
+		var a SlurmActivity
+		if err := workflow.ExecuteActivity(
+			cleanupCtx, a.CancelRemoteSlurmJobsActivity, request,
+		).Get(cleanupCtx, &evidence); err != nil {
+			retErr = fmt.Errorf("Slurm cancellation cleanup failed: %w", err)
+			return
+		}
+		retErr = temporal.NewCanceledError(evidence)
+	}()
+
 	// These should be empty at start of each workflow incarnation.
 	state.FinalErr = nil
 	state.GetOutputFutures = make(map[int]GetOutputsFuture)
@@ -970,7 +1243,7 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 	for workflow.GetInfo(ctx).GetCurrentHistoryLength() < 9000 {
 		selector.Select(ctx)
 		if ctx.Err() != nil {
-			return nil
+			return ctx.Err()
 		}
 
 		if state.FinalErr != nil {
@@ -991,7 +1264,13 @@ func SlurmPollerWorkflow(ctx workflow.Context, state SlurmState) error {
 
 	// Drain in-flight GetOutput futures so we don't lose their callbacks
 	// along with the selector.
-	for slurmBatchInd, f := range state.GetOutputFutures {
+	batchIDs := make([]int, 0, len(state.GetOutputFutures))
+	for slurmBatchInd := range state.GetOutputFutures {
+		batchIDs = append(batchIDs, slurmBatchInd)
+	}
+	sort.Ints(batchIDs)
+	for _, slurmBatchInd := range batchIDs {
+		f := state.GetOutputFutures[slurmBatchInd]
 		f.callback(f.future)
 		delete(state.GetOutputFutures, slurmBatchInd)
 	}

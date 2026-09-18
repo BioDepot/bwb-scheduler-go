@@ -2,6 +2,9 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"go-scheduler/fs"
@@ -10,9 +13,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"regexp"
+	"strings"
 
+	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/converter"
 	temporalLog "go.temporal.io/sdk/log"
 )
 
@@ -21,11 +28,18 @@ type StartWorkflowRequest struct {
 	ResolvedWorkflow json.RawMessage     `json:"resolved_workflow"`
 	WorkerInfo       workflow.WorkerInfo `json:"worker_info"`
 	Config           json.RawMessage     `json:"config,omitempty"`
+	RequestID        string              `json:"request_id,omitempty"`
+	WorkflowID       string              `json:"workflow_id,omitempty"`
+	WorkbenchRunID   string              `json:"workbench_run_id,omitempty"`
+	ExecutorID       string              `json:"executor_id,omitempty"`
+	SiteProfileID    string              `json:"site_profile_id,omitempty"`
 }
 
 type StartWorkflowResponse struct {
-	WorkflowID string `json:"workflow_id"`
-	RunID      string `json:"run_id"`
+	WorkflowID     string `json:"workflow_id"`
+	RunID          string `json:"run_id"`
+	RequestID      string `json:"request_id,omitempty"`
+	WorkbenchRunID string `json:"workbench_run_id,omitempty"`
 }
 
 type StopWorkflowRequest struct {
@@ -34,7 +48,8 @@ type StopWorkflowRequest struct {
 }
 
 type StopWorkflowResponse struct {
-	Message string `json:"message"`
+	Message        string `json:"message"`
+	WorkflowStatus string `json:"workflow_status"`
 }
 
 type WorkflowStatusRequest struct {
@@ -43,24 +58,39 @@ type WorkflowStatusRequest struct {
 }
 
 type WorkflowStatusResponse struct {
-	WorkflowStatus string         `json:"workflow_status"`
-	NodeStatuses   map[int]string `json:"node_statuses"`
+	WorkflowStatus    string                              `json:"workflow_status"`
+	NodeStatuses      map[int]string                      `json:"node_statuses"`
+	SlurmCancellation *workflow.SlurmCancellationEvidence `json:"slurm_cancellation,omitempty"`
 }
 
 type Server struct {
 	temporalClient client.Client
 	logger         *slog.Logger
+	bearerToken    string
 }
 
 func NewServer(logger *slog.Logger) (*Server, error) {
+	hostPort := strings.TrimSpace(os.Getenv("BWB_TEMPORAL_ADDRESS"))
+	if hostPort == "" {
+		hostPort = "localhost:7233"
+	}
+	namespace := strings.TrimSpace(os.Getenv("BWB_TEMPORAL_NAMESPACE"))
+	if namespace == "" {
+		namespace = "default"
+	}
 	c, err := client.NewLazyClient(client.Options{
-		HostPort: "localhost:7233",
-		Logger:   temporalLog.NewStructuredLogger(logger),
+		HostPort:  hostPort,
+		Namespace: namespace,
+		Logger:    temporalLog.NewStructuredLogger(logger),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("unable to create Temporal client: %w", err)
 	}
-	return &Server{temporalClient: c, logger: logger}, nil
+	return &Server{
+		temporalClient: c,
+		logger:         logger,
+		bearerToken:    strings.TrimSpace(os.Getenv("BWB_API_BEARER_TOKEN")),
+	}, nil
 }
 
 func (s *Server) Close() {
@@ -68,9 +98,30 @@ func (s *Server) Close() {
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("/start_workflow", s.handleStartWorkflow)
-	mux.HandleFunc("/stop_workflow", s.handleStopWorkflow)
-	mux.HandleFunc("/workflow_status", s.handleWorkflowStatus)
+	mux.HandleFunc("/start_workflow", s.authenticated(s.handleStartWorkflow))
+	mux.HandleFunc("/stop_workflow", s.authenticated(s.handleStopWorkflow))
+	mux.HandleFunc("/workflow_status", s.authenticated(s.handleWorkflowStatus))
+}
+
+func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.bearerToken != "" {
+			const bearerPrefix = "Bearer "
+			header := r.Header.Get("Authorization")
+			if !strings.HasPrefix(header, bearerPrefix) {
+				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+				return
+			}
+			supplied := strings.TrimPrefix(header, bearerPrefix)
+			if len(supplied) != len(s.bearerToken) || subtle.ConstantTimeCompare(
+				[]byte(supplied), []byte(s.bearerToken),
+			) != 1 {
+				writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -95,6 +146,43 @@ func parseRequestJobConfig(
 		return parsing.JobConfig{}, err
 	}
 	return jobConfig, nil
+}
+
+var executionIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$`)
+
+func startRequestFingerprint(req StartWorkflowRequest) (string, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return "", fmt.Errorf("unable to encode start request: %w", err)
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func memoString(fields map[string]*commonpb.Payload, key string) (string, error) {
+	payload, ok := fields[key]
+	if !ok {
+		return "", nil
+	}
+	var value string
+	if err := converter.GetDefaultDataConverter().FromPayload(payload, &value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func terminalEvidenceFromMemo(
+	fields map[string]*commonpb.Payload,
+) (*workflow.WorkflowTerminalEvidence, error) {
+	payload, ok := fields[workflow.TerminalEvidenceMemoKey]
+	if !ok {
+		return nil, nil
+	}
+	var evidence workflow.WorkflowTerminalEvidence
+	if err := converter.GetDefaultDataConverter().FromPayload(payload, &evidence); err != nil {
+		return nil, err
+	}
+	return &evidence, nil
 }
 
 func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
@@ -138,8 +226,38 @@ func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fingerprint, err := startRequestFingerprint(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	workflowID := req.WorkflowID
+	if workflowID == "" && req.RequestID != "" {
+		workflowID = "morphic-" + req.RequestID
+	}
+	for field, value := range map[string]string{
+		"request_id":  req.RequestID,
+		"workflow_id": workflowID,
+	} {
+		if value != "" && !executionIDPattern.MatchString(value) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid %s %q", field, value))
+			return
+		}
+	}
+
 	workflowOptions := client.StartWorkflowOptions{
-		TaskQueue: "bwb_worker",
+		ID:                                       workflowID,
+		TaskQueue:                                "bwb_worker",
+		WorkflowIDConflictPolicy:                 enumspb.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING,
+		WorkflowIDReusePolicy:                    enumspb.WORKFLOW_ID_REUSE_POLICY_REJECT_DUPLICATE,
+		WorkflowExecutionErrorWhenAlreadyStarted: false,
+		Memo: map[string]interface{}{
+			"bwb_request_id":          req.RequestID,
+			"bwb_request_fingerprint": fingerprint,
+			"bwb_workbench_run_id":    req.WorkbenchRunID,
+			"bwb_executor_id":         req.ExecutorID,
+			"bwb_site_profile_id":     req.SiteProfileID,
+		},
 	}
 
 	workers := map[string]workflow.WorkerInfo{
@@ -159,10 +277,40 @@ func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to start workflow: %s", err))
 		return
 	}
+	if req.RequestID != "" {
+		desc, describeErr := s.temporalClient.DescribeWorkflowExecution(
+			r.Context(), we.GetID(), we.GetRunID(),
+		)
+		if describeErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"failed to verify execution identity: %s", describeErr,
+			))
+			return
+		}
+		fields := desc.WorkflowExecutionInfo.Memo.GetFields()
+		existingRequestID, decodeErr := memoString(fields, "bwb_request_id")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode existing request identity")
+			return
+		}
+		existingFingerprint, decodeErr := memoString(fields, "bwb_request_fingerprint")
+		if decodeErr != nil {
+			writeError(w, http.StatusInternalServerError, "failed to decode existing request fingerprint")
+			return
+		}
+		if existingRequestID != req.RequestID || existingFingerprint != fingerprint {
+			writeError(w, http.StatusConflict, fmt.Sprintf(
+				"workflow_id %q already belongs to a different request", we.GetID(),
+			))
+			return
+		}
+	}
 
 	writeJSON(w, http.StatusOK, StartWorkflowResponse{
-		WorkflowID: we.GetID(),
-		RunID:      we.GetRunID(),
+		WorkflowID:     we.GetID(),
+		RunID:          we.GetRunID(),
+		RequestID:      req.RequestID,
+		WorkbenchRunID: req.WorkbenchRunID,
 	})
 }
 
@@ -182,17 +330,30 @@ func (s *Server) handleStopWorkflow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "workflow_id is required")
 		return
 	}
-
-	err := s.temporalClient.TerminateWorkflow(
-		r.Context(), req.WorkflowID, req.RunID, "terminated via API",
+	desc, err := s.temporalClient.DescribeWorkflowExecution(
+		r.Context(), req.WorkflowID, req.RunID,
 	)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to terminate workflow: %s", err))
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to describe workflow before cancellation: %s", err))
+		return
+	}
+	if status, terminal := temporalStatusString(desc.WorkflowExecutionInfo.Status); terminal {
+		writeJSON(w, http.StatusOK, StopWorkflowResponse{
+			Message:        fmt.Sprintf("workflow %s is already %s", req.WorkflowID, status),
+			WorkflowStatus: status,
+		})
+		return
+	}
+
+	err = s.temporalClient.CancelWorkflow(r.Context(), req.WorkflowID, req.RunID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to request workflow cancellation: %s", err))
 		return
 	}
 
 	writeJSON(w, http.StatusOK, StopWorkflowResponse{
-		Message: fmt.Sprintf("workflow %s terminated", req.WorkflowID),
+		Message:        fmt.Sprintf("workflow %s cancellation requested", req.WorkflowID),
+		WorkflowStatus: "CANCEL_REQUESTED",
 	})
 }
 
@@ -249,11 +410,30 @@ func (s *Server) handleWorkflowStatus(w http.ResponseWriter, r *http.Request) {
 	execStatus := desc.WorkflowExecutionInfo.Status
 	statusStr, isTerminal := temporalStatusString(execStatus)
 
-	// Terminal workflows can't answer queries; return early with no node detail.
+	// Terminal workflows can't answer queries. Their final node and Slurm
+	// cleanup evidence is persisted in workflow memo before close.
 	if isTerminal {
+		evidence, evidenceErr := terminalEvidenceFromMemo(
+			desc.WorkflowExecutionInfo.Memo.GetFields(),
+		)
+		if evidenceErr != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Sprintf(
+				"failed to decode terminal workflow evidence: %s", evidenceErr,
+			))
+			return
+		}
+		response := WorkflowStatusResponse{WorkflowStatus: statusStr}
+		if evidence != nil {
+			response.NodeStatuses = evidence.NodeStatuses
+			response.SlurmCancellation = evidence.SlurmCancellation
+			if evidence.WorkflowStatus == "CANCEL_CLEANUP_FAILED" {
+				response.WorkflowStatus = evidence.WorkflowStatus
+			}
+		}
 		writeJSON(w, http.StatusOK, WorkflowStatusResponse{
-			WorkflowStatus: statusStr,
-			NodeStatuses:   nil,
+			WorkflowStatus:    response.WorkflowStatus,
+			NodeStatuses:      response.NodeStatuses,
+			SlurmCancellation: response.SlurmCancellation,
 		})
 		return
 	}

@@ -1,6 +1,9 @@
 package workflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,7 @@ import (
 	"go-scheduler/fs"
 	"go-scheduler/parsing"
 
+	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
 )
@@ -22,13 +26,14 @@ type SlurmRemoteExecutor struct {
 	errors            []error
 	sshConfig         parsing.SshConfig
 	handleFinishedCmd CmdHandler
-	handleFileXfers	  FileXferHandler
+	handleFileXfers   FileXferHandler
 	configsByNode     map[int]parsing.SlurmJobConfig
 	schedDir          string
 	selector          *workflow.Selector
 	slurmPollerWE     workflow.Execution
 	slurmPollerFuture workflow.ChildWorkflowFuture
 	cancelChild       func()
+	cancellation      *SlurmCancellationEvidence
 }
 
 func NewSlurmRemoteExecutor(
@@ -72,18 +77,21 @@ func (exec *SlurmRemoteExecutor) setupFS(v1 bool) (fs.SshFS, error) {
 	mkdirCtx := workflow.WithActivityOptions(exec.ctx, ao)
 
 	err := workflow.ExecuteActivity(
-		mkdirCtx, a.ExecCmd, fmt.Sprintf("mkdir -p %s", filepath.Join(dataDir, "data")),
+		mkdirCtx, a.ExecCmd, fmt.Sprintf("mkdir -p -- %s", shellQuote(filepath.Join(dataDir, "data"))),
 	).Get(exec.ctx, nil)
 	if err != nil {
 		return fs.SshFS{}, err
 	}
 
 	return fs.SshFS{
-		User:  exec.sshConfig.User,
-		Endpt: exec.sshConfig.TransferAddr,
-		RemoteRootDir: dataDir,
-		LocalRootDir: exec.masterFS.GetRootDir(),
-		RootDir: dataDir,
+		User:           exec.sshConfig.User,
+		Endpt:          exec.sshConfig.TransferAddr,
+		Port:           exec.sshConfig.TransferPort,
+		IdentityFile:   exec.sshConfig.IdentityFile,
+		KnownHostsFile: exec.sshConfig.KnownHostsFile,
+		RemoteRootDir:  dataDir,
+		LocalRootDir:   exec.masterFS.GetRootDir(),
+		RootDir:        dataDir,
 	}, nil
 }
 
@@ -123,9 +131,14 @@ func (exec *SlurmRemoteExecutor) Setup(v1 bool) error {
 
 	childCtx, cancelChild := workflow.WithCancel(exec.ctx)
 	queueName := GetTemporalSshQueueName(exec.sshConfig)
+	parentInfo := workflow.GetInfo(exec.ctx).WorkflowExecution
 	schedChildWfOptions := workflow.ChildWorkflowOptions{
-		WorkflowID: fmt.Sprintf("slurm_poller_%s", queueName),
-		TaskQueue:  queueName,
+		WorkflowID: slurmPollerWorkflowID(
+			parentInfo.ID, parentInfo.RunID, exec.storageId, exec.sshConfig,
+		),
+		TaskQueue:           queueName,
+		WaitForCancellation: true,
+		ParentClosePolicy:   enumspb.PARENT_CLOSE_POLICY_REQUEST_CANCEL,
 	}
 	childCtx = workflow.WithChildOptions(childCtx, schedChildWfOptions)
 
@@ -196,6 +209,12 @@ func (exec *SlurmRemoteExecutor) RunCmds(
 		req := SlurmRequest{
 			Cmd:    cmd,
 			Config: slurmConfig,
+			CorrelationKey: slurmJobCorrelationKey(
+				workflow.GetInfo(exec.ctx).WorkflowExecution.ID,
+				workflow.GetInfo(exec.ctx).WorkflowExecution.RunID,
+				cmd.Cmd.NodeId,
+				cmd.Cmd.Id,
+			),
 		}
 		if len(cmd.Xfers) == 0 {
 			workflow.SignalExternalWorkflow(
@@ -217,26 +236,26 @@ func (exec *SlurmRemoteExecutor) RunCmds(
 		remaining := len(downloadFutures)
 		failed := false
 		for _, fut := range downloadFutures {
-		    (*exec.selector).AddFuture(fut, func(f workflow.Future) {
-		        if failed {
-		            return
-		        }
-			
-		        if err := f.Get(exec.ctx, nil); err != nil {
+			(*exec.selector).AddFuture(fut, func(f workflow.Future) {
+				if failed {
+					return
+				}
+
+				if err := f.Get(exec.ctx, nil); err != nil {
 					exec.errors = append(exec.errors, fmt.Errorf(
 						"xfer failed with error %s", err,
 					))
-		            return
-		        }
-			
-		        remaining--
-		        if remaining == 0 {
+					return
+				}
+
+				remaining--
+				if remaining == 0 {
 					workflow.SignalExternalWorkflow(
 						exec.ctx, exec.slurmPollerWE.ID, "",
 						"slurm-request", req,
 					)
-		        }
-		    })
+				}
+			})
 		}
 	}
 }
@@ -245,8 +264,81 @@ func (exec *SlurmRemoteExecutor) SetCmdHandler(handler CmdHandler) {
 	exec.handleFinishedCmd = handler
 }
 
-func (exec *SlurmRemoteExecutor) Shutdown() {
+func (exec *SlurmRemoteExecutor) Shutdown() error {
+	if exec.cancelChild == nil || exec.slurmPollerFuture == nil {
+		return nil
+	}
 	exec.cancelChild()
+	disconnectedCtx, _ := workflow.NewDisconnectedContext(exec.ctx)
+	err := exec.slurmPollerFuture.Get(disconnectedCtx, nil)
+	if err == nil {
+		return nil
+	}
+	var canceledErr *temporal.CanceledError
+	if errors.As(err, &canceledErr) {
+		if canceledErr.HasDetails() {
+			var evidence SlurmCancellationEvidence
+			if detailErr := canceledErr.Details(&evidence); detailErr != nil {
+				return fmt.Errorf("failed decoding Slurm cancellation evidence: %w", detailErr)
+			}
+			exec.cancellation = &evidence
+		}
+		return nil
+	}
+	exec.cancellation = &SlurmCancellationEvidence{
+		CleanupStatus: "failed",
+		Verified:      false,
+		Error:         err.Error(),
+	}
+	return fmt.Errorf("Slurm poller shutdown failed: %w", err)
+}
+
+func (exec *SlurmRemoteExecutor) TerminalEvidence() *SlurmCancellationEvidence {
+	return exec.cancellation
+}
+
+func slurmPollerWorkflowID(
+	parentWorkflowID, parentRunID, storageID string, config parsing.SshConfig,
+) string {
+	identity := strings.Join([]string{
+		parentWorkflowID,
+		parentRunID,
+		storageID,
+		config.User,
+		config.IpAddr,
+		config.TransferAddr,
+		fmt.Sprintf("%d", config.TransferPort),
+		config.SchedDir,
+	}, "\x00")
+	sum := sha256.Sum256([]byte(identity))
+	prefix := safeWorkflowIDComponent(parentWorkflowID)
+	if len(prefix) > 24 {
+		prefix = prefix[:24]
+	}
+	return fmt.Sprintf("slurm-poller-%s-%s", prefix, hex.EncodeToString(sum[:10]))
+}
+
+func safeWorkflowIDComponent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('-')
+		}
+	}
+	value = strings.Trim(b.String(), "-_")
+	if value == "" {
+		return "workflow"
+	}
+	return value
+}
+
+func slurmJobCorrelationKey(workflowID, runID string, nodeID, commandID int) string {
+	identity := fmt.Sprintf("%s\x00%s\x00%d\x00%d", workflowID, runID, nodeID, commandID)
+	sum := sha256.Sum256([]byte(identity))
+	return "morphic-" + hex.EncodeToString(sum[:12])
 }
 
 func (exec *SlurmRemoteExecutor) GetErrors() []error {

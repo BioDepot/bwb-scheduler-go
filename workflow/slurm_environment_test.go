@@ -36,6 +36,7 @@ func TestWriteSbatchFileExportsSiteEnvironmentDeterministically(t *testing.T) {
 		"/slurm",
 		"/images",
 		"job-1",
+		"morphic-test-job",
 	)
 	if err != nil {
 		t.Fatalf("WriteSbatchFile returned an error: %v", err)

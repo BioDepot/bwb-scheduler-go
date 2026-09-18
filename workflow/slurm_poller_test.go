@@ -2,15 +2,18 @@ package workflow
 
 import (
 	"errors"
+	"fmt"
 	"go-scheduler/parsing"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
-    "strings"
-    "fmt"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.temporal.io/sdk/converter"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 )
@@ -29,6 +32,129 @@ func startActivityMatcher(expCmd parsing.CmdTemplate, expConfig parsing.SlurmJob
 		cfg, ok2 := args[1].(parsing.SlurmJobConfig)
 		return ok1 && ok2 && cmd.Id == expCmd.Id && cfg.Mem == expConfig.Mem
 	})
+}
+
+func TestCancelSlurmJobsRecoversManifestAndLeavesForeignJobsAlone(t *testing.T) {
+	active := map[string]string{
+		"123": "morphic-requested",
+		"456": "morphic-recovered",
+		"999": "someone-else",
+	}
+	var cancelCommands []string
+	runCmd := func(cmd string) (CmdOut, error) {
+		switch {
+		case strings.Contains(cmd, "submissions.tsv"):
+			return CmdOut{StdOut: "morphic-requested\t123\nmorphic-recovered\t456\n"}, nil
+		case strings.HasPrefix(cmd, "squeue "):
+			var lines []string
+			for jobID, name := range active {
+				lines = append(lines, jobID+"|"+name)
+			}
+			sort.Strings(lines)
+			return CmdOut{StdOut: strings.Join(lines, "\n") + "\n"}, nil
+		case strings.HasPrefix(cmd, "scancel "):
+			cancelCommands = append(cancelCommands, cmd)
+			for jobID := range active {
+				if strings.Contains(cmd, "'"+jobID+"'") {
+					delete(active, jobID)
+				}
+			}
+			return CmdOut{}, nil
+		default:
+			return CmdOut{}, fmt.Errorf("unexpected command %q", cmd)
+		}
+	}
+
+	evidence, err := cancelSlurmJobs(SlurmCancellationRequest{
+		JobIDs:          []string{"123"},
+		CorrelationKeys: []string{"morphic-requested", "morphic-recovered"},
+		ManifestPath:    "/srv/slurm_mnt/slurm/submissions.tsv",
+		User:            "tutorial",
+	}, runCmd, func(time.Duration) {}, 5)
+	if err != nil {
+		t.Fatalf("cancelSlurmJobs returned error: %v", err)
+	}
+	if !evidence.Verified || evidence.CleanupStatus != "verified" {
+		t.Fatalf("unexpected cancellation evidence: %#v", evidence)
+	}
+	require.Equal(t, []string{"456"}, evidence.RecoveredJobIDs)
+	require.Equal(t, []string{"123", "456"}, evidence.VerifiedTerminalIDs)
+	if _, ok := active["999"]; !ok {
+		t.Fatal("foreign Slurm job was canceled")
+	}
+	for _, cmd := range cancelCommands {
+		if strings.Contains(cmd, "999") {
+			t.Fatalf("foreign Slurm job appeared in scancel command %q", cmd)
+		}
+	}
+}
+
+func TestCancelSlurmJobsRejectsInvalidJobIDBeforeRemoteCommand(t *testing.T) {
+	called := false
+	_, err := cancelSlurmJobs(SlurmCancellationRequest{
+		JobIDs: []string{"123; scancel 999"},
+		User:   "tutorial",
+	}, func(string) (CmdOut, error) {
+		called = true
+		return CmdOut{}, nil
+	}, func(time.Duration) {}, 1)
+	if err == nil || !strings.Contains(err.Error(), "invalid Slurm job ID") {
+		t.Fatalf("expected invalid job ID error, got %v", err)
+	}
+	if called {
+		t.Fatal("remote command ran before Slurm job ID validation")
+	}
+}
+
+func TestSlurmPollerCancellationRunsDisconnectedCleanup(t *testing.T) {
+	var a SlurmActivity
+	testSuite := &testsuite.WorkflowTestSuite{}
+	env := testSuite.NewTestWorkflowEnvironment()
+	env.RegisterActivity(a.CancelRemoteSlurmJobsActivity)
+	expectedEvidence := SlurmCancellationEvidence{
+		RequestedJobIDs:     []string{"123"},
+		CorrelationKeys:     []string{"morphic-test"},
+		VerifiedTerminalIDs: []string{"123"},
+		CleanupStatus:       "verified",
+		Verified:            true,
+	}
+	env.OnActivity(
+		a.CancelRemoteSlurmJobsActivity,
+		mock.MatchedBy(func(request SlurmCancellationRequest) bool {
+			return request.User == "tutorial" &&
+				reflect.DeepEqual([]string{"123"}, request.JobIDs) &&
+				reflect.DeepEqual([]string{"morphic-test"}, request.CorrelationKeys)
+		}),
+	).Return(expectedEvidence, nil).Once()
+	env.RegisterDelayedCallback(env.CancelWorkflow, time.Second)
+	env.ExecuteWorkflow(SlurmPollerWorkflow, SlurmState{
+		ParentWfId: "parent",
+		SlurmConfig: parsing.SshConfig{
+			User:     "tutorial",
+			SchedDir: "/srv/slurm_mnt",
+		},
+		RunningJobs: map[string]SlurmJob{
+			"123": {JobId: "123", CorrelationKey: "morphic-test"},
+		},
+		Requests: map[int]SlurmRequest{
+			1: {CorrelationKey: "morphic-test"},
+		},
+	})
+
+	err := env.GetWorkflowError()
+	if !temporal.IsCanceledError(err) {
+		t.Fatalf("workflow did not close as canceled: %v", err)
+	}
+	var canceledErr *temporal.CanceledError
+	if !errors.As(err, &canceledErr) || !canceledErr.HasDetails() {
+		t.Fatalf("cancellation evidence was not attached: %v", err)
+	}
+	var actual SlurmCancellationEvidence
+	if err := canceledErr.Details(&actual); err != nil {
+		t.Fatalf("failed decoding cancellation evidence: %v", err)
+	}
+	require.Equal(t, expectedEvidence, actual)
+	env.AssertExpectations(t)
 }
 
 // Test the lifecycle of a successful SLURM job.
@@ -57,11 +183,11 @@ func TestSlurmResponse(t *testing.T) {
 	expCmd := parsing.CmdRunParams{Cmd: parsing.CmdTemplate{Id: cmdId}}
 	expSlurmJob := SlurmJob{CmdId: cmdId, JobId: jobId}
 
-	// StartRemoteSlurmJobActivity now receives 5 args:
-	// cmd, jobConfig, fs, slurmDir, imageDir.
+	// StartRemoteSlurmJobActivity receives cmd, jobConfig, correlation key,
+	// filesystem, Slurm directory, and image directory.
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything,
+		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -136,7 +262,7 @@ func TestSlurmContinueAsNewStateMaintenance(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything,
+		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -223,7 +349,7 @@ func TestSlurmJobFatalFailure(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything,
+		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -285,7 +411,7 @@ func TestSlurmJobNonFatalFailure(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything,
+		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Times(maxRetries + 1)
 
 	// Handle workflow polling before request, which should be empty.
@@ -347,7 +473,7 @@ func TestSlurmJobRetryOnNonFatalErr(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything,
+		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Times(maxRetries + 1)
 
 	// Handle workflow polling before request, which should be empty.
@@ -394,7 +520,6 @@ func TestSlurmJobRetryOnNonFatalErr(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 }
 
- 
 // simulateScriptOutput produces the stdout that the gather script would emit
 // for the given jobs and canned data, using the specified token. This lets
 // tests exercise parseGatherOutput without needing a real SSH connection.
@@ -406,27 +531,27 @@ type fakeJobData struct {
 	stdoutMissing bool
 	stderrMissing bool
 }
- 
+
 func simulateScriptOutput(jobs []SlurmJob, data []fakeJobData, token string) string {
 	var b strings.Builder
 	for i, job := range jobs {
 		_ = job
 		d := data[i]
- 
+
 		fmt.Fprintf(&b, "\n%s:%d:%s:\n", token, i, sectionStdout)
 		if d.stdoutMissing {
 			b.WriteString(missingFileMarker)
 		} else {
 			b.WriteString(d.stdout)
 		}
- 
+
 		fmt.Fprintf(&b, "\n%s:%d:%s:\n", token, i, sectionStderr)
 		if d.stderrMissing {
 			b.WriteString(missingFileMarker)
 		} else {
 			b.WriteString(d.stderr)
 		}
- 
+
 		for fname, content := range d.outputFiles {
 			fmt.Fprintf(&b, "\n%s:%d:%s:%s\n", token, i, sectionOutputFile, fname)
 			b.WriteString(content)
@@ -434,7 +559,7 @@ func simulateScriptOutput(jobs []SlurmJob, data []fakeJobData, token string) str
 	}
 	return b.String()
 }
- 
+
 func TestShellQuote_SimplePath(t *testing.T) {
 	got := shellQuote("/ocean/projects/sched/job1.out")
 	want := "'/ocean/projects/sched/job1.out'"
@@ -442,7 +567,7 @@ func TestShellQuote_SimplePath(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
- 
+
 func TestShellQuote_PathWithSpaces(t *testing.T) {
 	got := shellQuote("/path with spaces/file")
 	want := "'/path with spaces/file'"
@@ -450,7 +575,7 @@ func TestShellQuote_PathWithSpaces(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
- 
+
 func TestShellQuote_SingleQuoteInPath(t *testing.T) {
 	got := shellQuote("/path/it's/here")
 	want := "'/path/it'\\''s/here'"
@@ -458,7 +583,7 @@ func TestShellQuote_SingleQuoteInPath(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
- 
+
 func TestShellQuote_MultipleSingleQuotes(t *testing.T) {
 	got := shellQuote("a'b'c")
 	want := "'a'\\''b'\\''c'"
@@ -466,7 +591,7 @@ func TestShellQuote_MultipleSingleQuotes(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
- 
+
 func TestShellQuote_EmptyString(t *testing.T) {
 	got := shellQuote("")
 	want := "''"
@@ -474,7 +599,7 @@ func TestShellQuote_EmptyString(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
- 
+
 func TestBuildGatherScript_TokenEmbedded(t *testing.T) {
 	token := "cafebabe12345678"
 	jobs := []SlurmJob{{
@@ -487,7 +612,7 @@ func TestBuildGatherScript_TokenEmbedded(t *testing.T) {
 		t.Error("token not embedded in script")
 	}
 }
- 
+
 func TestBuildGatherScript_AllPathsPresent(t *testing.T) {
 	token := "tok"
 	job := SlurmJob{
@@ -504,7 +629,7 @@ func TestBuildGatherScript_AllPathsPresent(t *testing.T) {
 		}
 	}
 }
- 
+
 func TestBuildGatherScript_CleanupRmRfPresent(t *testing.T) {
 	token := "tok"
 	job := SlurmJob{
@@ -528,7 +653,7 @@ func TestBuildGatherScript_CleanupRmRfPresent(t *testing.T) {
 		}
 	}
 }
- 
+
 func TestBuildGatherScript_CleanupAfterReads(t *testing.T) {
 	// The rm -rf must come after the await_and_cat calls for the same job,
 	// so output is already captured before deletion.
@@ -545,7 +670,7 @@ func TestBuildGatherScript_CleanupAfterReads(t *testing.T) {
 		t.Error("rm -rf appears before the last await_and_cat; cleanup would delete files before reading them")
 	}
 }
- 
+
 func TestBuildGatherScript_MultipleJobs_AllPathsPresent(t *testing.T) {
 	token := "tok"
 	jobs := []SlurmJob{
@@ -565,7 +690,7 @@ func TestBuildGatherScript_MultipleJobs_AllPathsPresent(t *testing.T) {
 		t.Errorf("expected 3 rm -rf lines, got %d", count)
 	}
 }
- 
+
 func TestBuildGatherScript_SingleQuoteInPath_Escaped(t *testing.T) {
 	token := "tok"
 	job := SlurmJob{
@@ -578,7 +703,7 @@ func TestBuildGatherScript_SingleQuoteInPath_Escaped(t *testing.T) {
 		t.Error("single quotes in paths were not escaped")
 	}
 }
- 
+
 func TestBuildGatherScript_AwaitAndCatDefined(t *testing.T) {
 	script := buildGatherScript([]SlurmJob{{OutPath: "/a", ErrPath: "/b", TmpOutputHostPath: "/c", SbatchPath: "/d"}}, "tok")
 	if !strings.Contains(script, "await_and_cat()") {
@@ -588,7 +713,7 @@ func TestBuildGatherScript_AwaitAndCatDefined(t *testing.T) {
 		t.Error("grace-period sleep not present in await_and_cat")
 	}
 }
- 
+
 func TestBuildGatherScript_SectionMarkersPresent(t *testing.T) {
 	token := "tok"
 	job := SlurmJob{OutPath: "/a.out", ErrPath: "/a.err", TmpOutputHostPath: "/tmp/a", SbatchPath: "/a.sbatch"}
@@ -599,9 +724,9 @@ func TestBuildGatherScript_SectionMarkersPresent(t *testing.T) {
 		}
 	}
 }
- 
+
 // --- parseGatherOutput ---
- 
+
 func TestParseGatherOutput_SingleJob_BasicContents(t *testing.T) {
 	token := "aaaa000000000000"
 	jobs := []SlurmJob{{CmdId: 5, JobId: "j5", OutPath: "/s/j5.out", ErrPath: "/s/j5.err", TmpOutputHostPath: "/s/j5"}}
@@ -626,7 +751,7 @@ func TestParseGatherOutput_SingleJob_BasicContents(t *testing.T) {
 		t.Errorf("result.txt = %q, want %q", entry.outputFiles["result.txt"], "result content\n")
 	}
 }
- 
+
 func TestParseGatherOutput_SingleJob_NoOutputFiles(t *testing.T) {
 	token := "bbbb111111111111"
 	jobs := []SlurmJob{{CmdId: 1, JobId: "j1", OutPath: "/s/j1.out", ErrPath: "/s/j1.err", TmpOutputHostPath: "/s/j1"}}
@@ -640,7 +765,7 @@ func TestParseGatherOutput_SingleJob_NoOutputFiles(t *testing.T) {
 		t.Errorf("expected no output files, got %v", results[1].outputFiles)
 	}
 }
- 
+
 func TestParseGatherOutput_SingleJob_MultipleOutputFiles(t *testing.T) {
 	token := "cccc222222222222"
 	jobs := []SlurmJob{{CmdId: 2, JobId: "j2", OutPath: "/s/j2.out", ErrPath: "/s/j2.err", TmpOutputHostPath: "/s/j2"}}
@@ -664,7 +789,7 @@ func TestParseGatherOutput_SingleJob_MultipleOutputFiles(t *testing.T) {
 		}
 	}
 }
- 
+
 func TestParseGatherOutput_MultipleJobs(t *testing.T) {
 	token := "dddd333333333333"
 	jobs := []SlurmJob{
@@ -704,7 +829,7 @@ func TestParseGatherOutput_MultipleJobs(t *testing.T) {
 		t.Errorf("job C should have no output files")
 	}
 }
- 
+
 func TestParseGatherOutput_MultilineContent(t *testing.T) {
 	token := "eeee444444444444"
 	multiline := "line1\nline2\nline3\nline4\n"
@@ -726,7 +851,7 @@ func TestParseGatherOutput_MultilineContent(t *testing.T) {
 		t.Errorf("out.txt = %q, want %q", results[7].outputFiles["out.txt"], multiline)
 	}
 }
- 
+
 func TestParseGatherOutput_ContentContainingWrongToken(t *testing.T) {
 	// File content that looks like a delimiter but uses a different token value.
 	// The parser must not split on it.
@@ -750,7 +875,7 @@ func TestParseGatherOutput_ContentContainingWrongToken(t *testing.T) {
 		t.Error("content around fake token was dropped")
 	}
 }
- 
+
 func TestParseGatherOutput_ContentContainingRealTokenMidLine(t *testing.T) {
 	// If the real token appears in the middle of a line (not at line start
 	// after the leading-newline split prefix), the parser must not split on it.
@@ -773,7 +898,7 @@ func TestParseGatherOutput_ContentContainingRealTokenMidLine(t *testing.T) {
 		t.Error("mid-line token occurrence was incorrectly treated as a section delimiter")
 	}
 }
- 
+
 func TestParseGatherOutput_OutputFilenameWithColons(t *testing.T) {
 	// Filenames with colons must be preserved intact (SplitN limit of 3).
 	token := "colontesttoken01"
@@ -792,7 +917,7 @@ func TestParseGatherOutput_OutputFilenameWithColons(t *testing.T) {
 		t.Errorf("filename with colons was mangled; outputFiles = %v", results[8].outputFiles)
 	}
 }
- 
+
 func TestParseGatherOutput_EmptyStdoutAndStderr(t *testing.T) {
 	token := "emptystdiotoken0"
 	jobs := []SlurmJob{{CmdId: 6, JobId: "j6", OutPath: "/s/j6.out", ErrPath: "/s/j6.err", TmpOutputHostPath: "/s/j6"}}
@@ -809,7 +934,7 @@ func TestParseGatherOutput_EmptyStdoutAndStderr(t *testing.T) {
 		t.Errorf("expected empty stdErr, got %q", results[6].stdErr)
 	}
 }
- 
+
 func TestParseGatherOutput_LargeContentInOutputFile(t *testing.T) {
 	token := "largefiletoken00"
 	jobs := []SlurmJob{{CmdId: 9, JobId: "j9", OutPath: "/s/j9.out", ErrPath: "/s/j9.err", TmpOutputHostPath: "/s/j9"}}
@@ -837,9 +962,9 @@ func TestParseGatherOutput_LargeContentInOutputFile(t *testing.T) {
 		t.Errorf("large content was not preserved intact in output file")
 	}
 }
- 
+
 // --- parseGatherOutput error cases ---
- 
+
 func TestParseGatherOutput_MissingStdout_ReturnsError(t *testing.T) {
 	token := "missstdouttoken0"
 	jobs := []SlurmJob{{CmdId: 1, JobId: "j1", OutPath: "/s/j1.out", ErrPath: "/s/j1.err", TmpOutputHostPath: "/s/j1"}}
@@ -856,7 +981,7 @@ func TestParseGatherOutput_MissingStdout_ReturnsError(t *testing.T) {
 		t.Errorf("error should mention the job ID, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_MissingStderr_ReturnsError(t *testing.T) {
 	token := "missstderrtoken0"
 	jobs := []SlurmJob{{CmdId: 2, JobId: "j2", OutPath: "/s/j2.out", ErrPath: "/s/j2.err", TmpOutputHostPath: "/s/j2"}}
@@ -870,7 +995,7 @@ func TestParseGatherOutput_MissingStderr_ReturnsError(t *testing.T) {
 		t.Errorf("error should mention 'stderr file missing', got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_MissingOutputFile_IsSkipped(t *testing.T) {
 	// A missing output file (missingFileMarker in an OUTPUT_FILE section)
 	// is non-fatal: the file is simply absent from the result map.
@@ -892,7 +1017,7 @@ func TestParseGatherOutput_MissingOutputFile_IsSkipped(t *testing.T) {
 		t.Error("missing output file should not appear in results map")
 	}
 }
- 
+
 func TestParseGatherOutput_MalformedHeader_TooFewColons(t *testing.T) {
 	token := "malformedtokenn1"
 	jobs := []SlurmJob{{CmdId: 1}}
@@ -906,7 +1031,7 @@ func TestParseGatherOutput_MalformedHeader_TooFewColons(t *testing.T) {
 		t.Errorf("error should mention malformed header, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_NonIntegerJobIndex(t *testing.T) {
 	token := "noninttoken00000"
 	jobs := []SlurmJob{{CmdId: 1}}
@@ -919,7 +1044,7 @@ func TestParseGatherOutput_NonIntegerJobIndex(t *testing.T) {
 		t.Errorf("error should mention non-integer job index, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_OutOfRangeJobIndex(t *testing.T) {
 	token := "outofrangetoken0"
 	jobs := []SlurmJob{{CmdId: 1}}
@@ -933,7 +1058,7 @@ func TestParseGatherOutput_OutOfRangeJobIndex(t *testing.T) {
 		t.Errorf("error should mention out-of-range, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_UnknownSectionType(t *testing.T) {
 	token := "unknownsecttoken"
 	jobs := []SlurmJob{{CmdId: 1}}
@@ -946,7 +1071,7 @@ func TestParseGatherOutput_UnknownSectionType(t *testing.T) {
 		t.Errorf("error should mention unknown section type, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_OutputFileSectionWithEmptyFilename(t *testing.T) {
 	token := "emptyfilenametok"
 	jobs := []SlurmJob{{CmdId: 1, JobId: "j1"}}
@@ -964,7 +1089,7 @@ func TestParseGatherOutput_OutputFileSectionWithEmptyFilename(t *testing.T) {
 		t.Errorf("error should mention empty filename, got: %v", err)
 	}
 }
- 
+
 func TestParseGatherOutput_EmptyJobsList(t *testing.T) {
 	results, err := parseGatherOutput("", []SlurmJob{}, "anytoken")
 	if err != nil {
@@ -974,7 +1099,7 @@ func TestParseGatherOutput_EmptyJobsList(t *testing.T) {
 		t.Errorf("expected empty results for empty job list, got %v", results)
 	}
 }
- 
+
 func TestParseGatherOutput_AllJobsKeyedByCmdId(t *testing.T) {
 	// Verify that CmdId is used as the map key, not the slice index.
 	token := "cmdidkeytoken000"
@@ -1004,9 +1129,9 @@ func TestParseGatherOutput_AllJobsKeyedByCmdId(t *testing.T) {
 		t.Errorf("CmdId 200 stdOut = %q, want %q", results[200].stdOut, "B out")
 	}
 }
- 
+
 // --- fetchAllJobOutputs ---
- 
+
 func TestFetchAllJobOutputs_EmptyJobList_NoSSHCall(t *testing.T) {
 	called := false
 	runCmd := func(_ string) (CmdOut, error) {
@@ -1024,7 +1149,7 @@ func TestFetchAllJobOutputs_EmptyJobList_NoSSHCall(t *testing.T) {
 		t.Error("runCmd should not be called for an empty job list")
 	}
 }
- 
+
 func TestFetchAllJobOutputs_SingleJob_RoundTrip(t *testing.T) {
 	job := SlurmJob{
 		CmdId: 42, JobId: "j42",
@@ -1049,7 +1174,7 @@ func TestFetchAllJobOutputs_SingleJob_RoundTrip(t *testing.T) {
 		t.Errorf("r.txt = %q, want %q", entry.outputFiles["r.txt"], "result")
 	}
 }
- 
+
 func TestFetchAllJobOutputs_MultipleJobs_RoundTrip(t *testing.T) {
 	jobs := []SlurmJob{
 		{CmdId: 1, JobId: "j1", OutPath: "/s/j1.out", ErrPath: "/s/j1.err", TmpOutputHostPath: "/s/j1", SbatchPath: "/s/j1.sbatch"},
@@ -1077,7 +1202,7 @@ func TestFetchAllJobOutputs_MultipleJobs_RoundTrip(t *testing.T) {
 		t.Errorf("job 2 f2.txt = %q", results[2].outputFiles["f2.txt"])
 	}
 }
- 
+
 func TestFetchAllJobOutputs_OnlyOneSSHCall(t *testing.T) {
 	jobs := []SlurmJob{
 		{CmdId: 1, JobId: "j1", OutPath: "/s/j1.out", ErrPath: "/s/j1.err", TmpOutputHostPath: "/s/j1", SbatchPath: "/s/j1.sbatch"},
@@ -1103,7 +1228,7 @@ func TestFetchAllJobOutputs_OnlyOneSSHCall(t *testing.T) {
 		t.Errorf("expected exactly 1 SSH call for %d jobs, got %d", len(jobs), callCount)
 	}
 }
- 
+
 func TestFetchAllJobOutputs_ScriptFailure_ReturnsError(t *testing.T) {
 	job := SlurmJob{CmdId: 1, JobId: "jfail"}
 	runCmd := func(_ string) (CmdOut, error) {
@@ -1114,8 +1239,7 @@ func TestFetchAllJobOutputs_ScriptFailure_ReturnsError(t *testing.T) {
 		t.Error("expected error on script failure, got nil")
 	}
 }
- 
- 
+
 // makeSimulatingRunCmd returns a CmdRunner that intercepts the gather script,
 // extracts the embedded token, and returns simulated output without any real
 // SSH connection.
@@ -1129,7 +1253,7 @@ func makeSimulatingRunCmd(jobs []SlurmJob, data []fakeJobData) CmdRunner {
 		return CmdOut{ExitCode: 0, StdOut: simulated}, nil
 	}
 }
- 
+
 // extractTokenFromScript parses the emit_sep function definition line to
 // recover the randomly generated token that buildGatherScript embedded.
 func extractTokenFromScript(script string) string {
@@ -1154,7 +1278,7 @@ func extractTokenFromScript(script string) string {
 	}
 	return ""
 }
- 
+
 func contains(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {

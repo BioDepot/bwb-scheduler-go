@@ -37,7 +37,7 @@ func checkDeps() error {
 func StartWorkers(
 	c client.Client, config parsing.JobConfig,
 	queueName string, cancelChan chan any,
-    useTemporal bool,
+	useTemporal bool,
 ) error {
 	if err := checkDeps(); err != nil {
 		return err
@@ -106,6 +106,7 @@ func StartSlurmWorker(
 	w.RegisterActivity(slurmActivityObj.ExecCmd)
 	w.RegisterActivity(slurmActivityObj.GetRemoteSlurmJobOutputsActivity)
 	w.RegisterActivity(slurmActivityObj.PollRemoteSlurmActivity)
+	w.RegisterActivity(slurmActivityObj.CancelRemoteSlurmJobsActivity)
 	w.RegisterActivity(slurmActivityObj.StartRemoteSlurmJobActivity)
 	w.RegisterActivity(fs.SshDownloadActivity)
 	w.RegisterActivity(fs.SshUploadActivity)
@@ -121,12 +122,12 @@ func StartSlurmWorker(
 }
 
 func getSshConnection(conf parsing.SshConfig) (*ssh.Client, *ssh.ClientConfig, error) {
-	authMethods, err := BuildAuthMethods()
+	authMethods, err := BuildAuthMethods(conf)
 	if err != nil {
 		return nil, nil, fmt.Errorf("ssh auth error: %s", err)
 	}
 
-	hostKeyCallback, err := getHostKeyCallback()
+	hostKeyCallback, err := getHostKeyCallback(conf)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error getting host keys: %s", err)
 	}
@@ -145,13 +146,13 @@ func getSshConnection(conf parsing.SshConfig) (*ssh.Client, *ssh.ClientConfig, e
 }
 
 // Paramiko-like: try agent first, then all keys in ~/.ssh/
-func BuildAuthMethods() ([]ssh.AuthMethod, error) {
+func BuildAuthMethods(conf parsing.SshConfig) ([]ssh.AuthMethod, error) {
 	var methods []ssh.AuthMethod
 	if am, ok := getAgentAuth(); ok {
 		methods = append(methods, am)
 	}
 
-	keyAuth, err := getAllKeyAuth()
+	keyAuth, err := getConfiguredKeyAuth(conf.IdentityFile)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +164,21 @@ func BuildAuthMethods() ([]ssh.AuthMethod, error) {
 		return nil, fmt.Errorf("no usable SSH auth methods found")
 	}
 	return methods, nil
+}
+
+func getConfiguredKeyAuth(identityFile string) (ssh.AuthMethod, error) {
+	if identityFile == "" {
+		return getAllKeyAuth()
+	}
+	data, err := os.ReadFile(identityFile)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read configured SSH identity %s: %w", identityFile, err)
+	}
+	signer, err := ssh.ParsePrivateKey(data)
+	if err != nil {
+		return nil, fmt.Errorf("unable to parse configured SSH identity %s: %w", identityFile, err)
+	}
+	return ssh.PublicKeys(signer), nil
 }
 
 func getAgentAuth() (ssh.AuthMethod, bool) {
@@ -223,11 +239,14 @@ func getAllKeyAuth() (ssh.AuthMethod, error) {
 }
 
 // host key verification from known_hosts
-func getHostKeyCallback() (ssh.HostKeyCallback, error) {
-	usr, err := user.Current()
-	if err != nil {
-		return nil, err
+func getHostKeyCallback(conf parsing.SshConfig) (ssh.HostKeyCallback, error) {
+	khPath := conf.KnownHostsFile
+	if khPath == "" {
+		usr, err := user.Current()
+		if err != nil {
+			return nil, err
+		}
+		khPath = filepath.Join(usr.HomeDir, ".ssh", "known_hosts")
 	}
-	khPath := filepath.Join(usr.HomeDir, ".ssh", "known_hosts")
 	return knownhosts.New(khPath)
 }

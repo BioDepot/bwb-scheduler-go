@@ -77,7 +77,9 @@ func (exec *LocalExecutor) Setup(v1 bool) error {
 
 	// Setup worker FS.
 	rootDir, err := fs.SetupRootDir(exec.storageId)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	exec.masterFS = fs.LocalFS{
 		RootDir: rootDir,
 	}
@@ -128,9 +130,10 @@ func (exec *LocalExecutor) Select() {
 	}
 }
 
-func (exec *LocalExecutor) Shutdown() {
+func (exec *LocalExecutor) Shutdown() error {
 	exec.doneChan <- true
 	exec.waitGroup.Wait()
+	return nil
 }
 
 func (exec *LocalExecutor) GetErrors() []error {
@@ -172,7 +175,7 @@ func (exec *LocalExecutor) BuildImages(imageNames []string) error {
 func (exec *LocalExecutor) RunCmdWithGrant(
 	cmd parsing.CmdRunParams, grant ResourceGrant,
 ) {
-    rootDir := exec.masterFS.GetRootDir()
+	rootDir := exec.masterFS.GetRootDir()
 	useDocker := exec.configsByNode[cmd.Cmd.NodeId].UseDocker
 	exec.waitGroup.Add(1)
 	go func() {

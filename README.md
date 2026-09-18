@@ -96,6 +96,20 @@ Flags:
       --workerName string   Temporal queue name for the local worker. Defaults to a random string.
 ```
 
+### Service environment
+
+The API, CLI Temporal mode, and workers share these settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `BWB_SCHED_DIR` | none | Local scheduler cache and `/data` staging root. |
+| `BWB_TEMPORAL_ADDRESS` | `localhost:7233` | Temporal frontend address. |
+| `BWB_TEMPORAL_NAMESPACE` | `default` | Temporal namespace used by both API and workers. |
+| `BWB_API_BEARER_TOKEN` | empty | When set, require this bearer token on every scheduler API route. |
+
+Use a dedicated Temporal namespace when testing a worker implementation that
+shares task queue names with an existing deployment.
+
 
 ## Example usage
  ### Bulk RNA workflow
@@ -159,15 +173,18 @@ See `serverIntegrationTest.py` for a full example of setting up workers, startin
 
 | Method | Path | Request Body | Response (200) |
 |--------|------|-------------|----------------|
-| `POST` | `/start_workflow` | `{"schema": "biodepot.resolved_workflow/v1", "resolved_workflow": <ResolvedWorkflow>, "worker_info": {"QueueId": string, "IsAlive": bool, "TotalResources": {"MemMb": int, "Cpus": int, "Gpus": int}, "UsedResources": {"MemMb": int, "Cpus": int, "Gpus": int}}, "config": <JobConfig> \| null}` | `{"workflow_id": string, "run_id": string}` |
-| `POST` | `/stop_workflow` | `{"workflow_id": string, "run_id": string \| null}` | `{"message": string}` |
-| `POST` | `/workflow_status` | `{"workflow_id": string, "run_id": string \| null}` | `{"workflow_status": "RUNNING\|FINISHED\|FAILED\|CANCELED\|TERMINATED\|TIMED_OUT", "node_statuses": {<node_id>: "RUNNING\|FINISHED\|FAILED\|CANCELED\|TERMINATED\|TIMED_OUT"} \| null}` |
+| `POST` | `/start_workflow` | `{"schema": "biodepot.resolved_workflow/v1", "resolved_workflow": <ResolvedWorkflow>, "worker_info": <WorkerInfo>, "config": <JobConfig> \| null, "request_id": string, "workflow_id": string, "workbench_run_id": string, "executor_id": string, "site_profile_id": string}` | `{"workflow_id": string, "run_id": string, "request_id": string, "workbench_run_id": string}` |
+| `POST` | `/stop_workflow` | `{"workflow_id": string, "run_id": string \| null}` | `{"message": string, "workflow_status": "CANCEL_REQUESTED\|FINISHED\|FAILED\|CANCELED\|TERMINATED\|TIMED_OUT"}` |
+| `POST` | `/workflow_status` | `{"workflow_id": string, "run_id": string \| null}` | `{"workflow_status": "RUNNING\|FINISHED\|FAILED\|CANCELED\|CANCEL_CLEANUP_FAILED\|TERMINATED\|TIMED_OUT", "node_statuses": {<node_id>: string}, "slurm_cancellation": <SlurmCancellationEvidence> \| null}` |
 
 ### Notes
 
 - `config` in `/start_workflow` is optional; if omitted, a default config is generated from the workflow. When present, it uses the same `executors` / `configs` / `node_configs` JSON format accepted by the CLI config file.
+- `request_id` and `workflow_id` make retried starts idempotent. Reusing an identity with materially different input returns HTTP `409`.
 - `run_id` in `/stop_workflow` and `/workflow_status` is optional; if omitted, the latest run for the given `workflow_id` is used.
-- `node_statuses` in `/workflow_status` is `null` when the workflow has reached a terminal status, since completed or failed workflows cannot be queried.
+- `/stop_workflow` requests cooperative cancellation. Slurm-backed workflows close as canceled only after owned jobs are reconciled, canceled, and verified absent.
+- Final node and Slurm cleanup evidence is persisted in Temporal memo, so terminal status does not depend on a live workflow query.
+- When `BWB_API_BEARER_TOKEN` is configured, send `Authorization: Bearer <token>` on every request.
 
 
 # Code structure
