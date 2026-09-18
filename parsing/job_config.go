@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -19,31 +21,56 @@ const (
 )
 
 type SshConfig struct {
-	IpAddr         string  `json:"ip_addr"`
-	User           string  `json:"user"`
-	TransferAddr   string  `json:"transfer_addr"`
-	TransferPort   int     `json:"transfer_port,omitempty"`
-	SchedDir       string  `json:"sched_dir"`
-	CmdPrefix      *string `json:"cmd_prefix"`
-	IdentityFile   string  `json:"identity_file,omitempty"`
-	KnownHostsFile string  `json:"known_hosts_file,omitempty"`
+	IpAddr                           string   `json:"ip_addr"`
+	CommandPort                      int      `json:"command_port,omitempty"`
+	User                             string   `json:"user"`
+	TransferAddr                     string   `json:"transfer_addr"`
+	TransferPort                     int      `json:"transfer_port,omitempty"`
+	SchedDir                         string   `json:"sched_dir"`
+	CmdPrefix                        *string  `json:"cmd_prefix"`
+	IdentityFile                     string   `json:"identity_file,omitempty"`
+	KnownHostsFile                   string   `json:"known_hosts_file,omitempty"`
+	ExpectedHostKeyFingerprint       string   `json:"expected_host_key_fingerprint,omitempty"`
+	ProjectFilesystemRoots           []string `json:"project_filesystem_roots,omitempty"`
+	AllowedTransferRoots             []string `json:"allowed_transfer_roots,omitempty"`
+	ContainerRuntime                 string   `json:"container_runtime,omitempty"`
+	PollerContinueAsNewHistoryLength int      `json:"poller_continue_as_new_history_length,omitempty"`
 }
 
 type SlurmJobConfig struct {
-	MaxRetries  *int              `json:"max_retries,omitempty"`
-	Mem         *string           `json:"mem,omitempty"`
-	CpusPerTask *int              `json:"cpus_per_task,omitempty"`
-	Gpus        *string           `json:"gpus,omitempty"`
-	Nodes       *int              `json:"nodes,omitempty"`
-	Ntasks      *int              `json:"ntasks,omitempty"`
-	Time        *string           `json:"time,omitempty"`
-	Partition   *string           `json:"partition,omitempty"`
-	Modules     *[]string         `json:"modules,omitempty"`
-	Environment map[string]string `json:"environment,omitempty"`
+	MaxRetries   *int              `json:"max_retries,omitempty"`
+	Mem          *string           `json:"mem,omitempty"`
+	CpusPerTask  *int              `json:"cpus_per_task,omitempty"`
+	Gpus         *string           `json:"gpus,omitempty"`
+	Nodes        *int              `json:"nodes,omitempty"`
+	Ntasks       *int              `json:"ntasks,omitempty"`
+	Time         *string           `json:"time,omitempty"`
+	Partition    *string           `json:"partition,omitempty"`
+	Account      *string           `json:"account,omitempty"`
+	QOS          *string           `json:"qos,omitempty"`
+	Reservation  *string           `json:"reservation,omitempty"`
+	TasksPerNode *int              `json:"tasks_per_node,omitempty"`
+	Modules      *[]string         `json:"modules,omitempty"`
+	Environment  map[string]string `json:"environment,omitempty"`
+}
+
+func (config SshConfig) CommandEndpoint() string {
+	if config.CommandPort == 0 {
+		return config.IpAddr
+	}
+	return net.JoinHostPort(config.IpAddr, strconv.Itoa(config.CommandPort))
 }
 
 type LocalJobConfig struct {
 	UseDocker bool
+}
+
+type ExecutionIdentity struct {
+	RequestID      string `json:"request_id"`
+	WorkflowID     string `json:"workflow_id"`
+	WorkbenchRunID string `json:"workbench_run_id"`
+	ExecutorID     string `json:"executor_id"`
+	SiteProfileID  string `json:"site_profile_id"`
 }
 
 type ConfigValue struct {
@@ -59,6 +86,8 @@ type RawJobConfig struct {
 }
 
 type JobConfig struct {
+	ExecutionIdentity  ExecutionIdentity
+	EvidenceDir        string
 	ExecTypeByNode     map[int]ExecType
 	SlurmExecutor      SshConfig
 	SlurmConfigsByNode map[int]SlurmJobConfig
@@ -209,7 +238,9 @@ func (jd *RawJobConfig) validateSshConfig(
 	}
 
 	var sshConfig SshConfig
-	if err := json.Unmarshal(configBytes, &sshConfig); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(configBytes)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&sshConfig); err != nil {
 		return fmt.Errorf(
 			"invalid SSH config for executor '%s': %w", executorName, err,
 		)
@@ -255,6 +286,24 @@ func (jd *RawJobConfig) validateSshConfig(
 	if sshConfig.TransferPort < 0 || sshConfig.TransferPort > 65535 {
 		return fmt.Errorf("SSH config for executor '%s' has invalid transfer_port %d", executorName, sshConfig.TransferPort)
 	}
+	if sshConfig.CommandPort < 0 || sshConfig.CommandPort > 65535 {
+		return fmt.Errorf("SSH config for executor '%s' has invalid command_port %d", executorName, sshConfig.CommandPort)
+	}
+	if sshConfig.PollerContinueAsNewHistoryLength < 0 {
+		return fmt.Errorf("SSH config for executor '%s' has invalid poller_continue_as_new_history_length %d", executorName, sshConfig.PollerContinueAsNewHistoryLength)
+	}
+	if sshConfig.CommandPort > 0 && strings.Contains(sshConfig.IpAddr, ":") {
+		return fmt.Errorf("SSH config for executor '%s' must not embed a port in ip_addr when command_port is set", executorName)
+	}
+	if sshConfig.ContainerRuntime == "" {
+		sshConfig.ContainerRuntime = "singularity"
+	}
+	if sshConfig.ContainerRuntime != "singularity" && sshConfig.ContainerRuntime != "apptainer" {
+		return fmt.Errorf("SSH config for executor '%s' has unsupported container_runtime %q", executorName, sshConfig.ContainerRuntime)
+	}
+	if sshConfig.ExpectedHostKeyFingerprint != "" && !strings.HasPrefix(sshConfig.ExpectedHostKeyFingerprint, "SHA256:") {
+		return fmt.Errorf("SSH config for executor '%s' requires an SHA256 host-key fingerprint", executorName)
+	}
 	if !filepath.IsAbs(sshConfig.SchedDir) || filepath.Clean(sshConfig.SchedDir) != sshConfig.SchedDir {
 		return fmt.Errorf(
 			"SSH config for executor '%s' requires an absolute canonical sched_dir, got %q",
@@ -271,6 +320,13 @@ func (jd *RawJobConfig) validateSshConfig(
 				"SSH config for executor '%s' requires an absolute canonical %s, got %q",
 				executorName, item.field, item.path,
 			)
+		}
+	}
+	for _, roots := range [][]string{sshConfig.ProjectFilesystemRoots, sshConfig.AllowedTransferRoots} {
+		for _, root := range roots {
+			if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+				return fmt.Errorf("SSH config for executor '%s' requires absolute canonical filesystem roots, got %q", executorName, root)
+			}
 		}
 	}
 
@@ -383,7 +439,9 @@ func (jd *RawJobConfig) validateAnnotations(
 	}
 
 	var slurmConfig SlurmJobConfig
-	if err := json.Unmarshal(annotationsBytes, &slurmConfig); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(annotationsBytes)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&slurmConfig); err != nil {
 		return fmt.Errorf(
 			"invalid SlurmJobConfig annotations for config '%s': %w",
 			configName, err,
@@ -416,6 +474,15 @@ func (jd *RawJobConfig) validateAnnotations(
 	if slurmConfig.Gpus != nil && !optionPattern.MatchString(*slurmConfig.Gpus) {
 		return fmt.Errorf("invalid Slurm GPU request %q", *slurmConfig.Gpus)
 	}
+	for field, value := range map[string]*string{
+		"account":     slurmConfig.Account,
+		"qos":         slurmConfig.QOS,
+		"reservation": slurmConfig.Reservation,
+	} {
+		if value != nil && !optionPattern.MatchString(*value) {
+			return fmt.Errorf("invalid Slurm %s %q", field, *value)
+		}
+	}
 	if slurmConfig.Modules != nil {
 		for _, module := range *slurmConfig.Modules {
 			if !optionPattern.MatchString(module) {
@@ -424,9 +491,10 @@ func (jd *RawJobConfig) validateAnnotations(
 		}
 	}
 	for field, value := range map[string]*int{
-		"cpus_per_task": slurmConfig.CpusPerTask,
-		"nodes":         slurmConfig.Nodes,
-		"ntasks":        slurmConfig.Ntasks,
+		"cpus_per_task":  slurmConfig.CpusPerTask,
+		"nodes":          slurmConfig.Nodes,
+		"ntasks":         slurmConfig.Ntasks,
+		"tasks_per_node": slurmConfig.TasksPerNode,
 	} {
 		if value != nil && *value <= 0 {
 			return fmt.Errorf("Slurm %s must be positive", field)

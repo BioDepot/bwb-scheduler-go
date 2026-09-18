@@ -3,3 +3,5 @@
 .vscode
 .vscode/*
 go-scheduler
+__pycache__/
+*.pyc

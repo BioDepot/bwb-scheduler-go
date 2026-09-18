@@ -106,6 +106,8 @@ The API, CLI Temporal mode, and workers share these settings:
 | `BWB_TEMPORAL_ADDRESS` | `localhost:7233` | Temporal frontend address. |
 | `BWB_TEMPORAL_NAMESPACE` | `default` | Temporal namespace used by both API and workers. |
 | `BWB_API_BEARER_TOKEN` | empty | When set, require this bearer token on every scheduler API route. |
+| `BWB_ADMIN_BEARER_TOKEN` | empty | Separate bearer token for the Slurm reconciliation endpoint. Ordinary API credentials are rejected. |
+| `BWB_EVIDENCE_DIR` | `$BWB_SCHED_DIR/workflow-evidence` | Durable terminal and reconciliation records retained independently of Temporal retention. |
 
 Use a dedicated Temporal namespace when testing a worker implementation that
 shares task queue names with an existing deployment.
@@ -173,18 +175,38 @@ See `serverIntegrationTest.py` for a full example of setting up workers, startin
 
 | Method | Path | Request Body | Response (200) |
 |--------|------|-------------|----------------|
-| `POST` | `/start_workflow` | `{"schema": "biodepot.resolved_workflow/v1", "resolved_workflow": <ResolvedWorkflow>, "worker_info": <WorkerInfo>, "config": <JobConfig> \| null, "request_id": string, "workflow_id": string, "workbench_run_id": string, "executor_id": string, "site_profile_id": string}` | `{"workflow_id": string, "run_id": string, "request_id": string, "workbench_run_id": string}` |
+| `POST` | `/start_workflow` | `{"schema": "biodepot.resolved_workflow/v1", "resolved_workflow": <ResolvedWorkflow>, "worker_info": <WorkerInfo>, "config": <JobConfig> \| null, "request_id": string, "workflow_id": string, "workbench_run_id": string, "executor_id": string, "site_profile_id": string}` | All five execution IDs plus the Temporal `run_id`. |
 | `POST` | `/stop_workflow` | `{"workflow_id": string, "run_id": string \| null}` | `{"message": string, "workflow_status": "CANCEL_REQUESTED\|FINISHED\|FAILED\|CANCELED\|TERMINATED\|TIMED_OUT"}` |
-| `POST` | `/workflow_status` | `{"workflow_id": string, "run_id": string \| null}` | `{"workflow_status": "RUNNING\|FINISHED\|FAILED\|CANCELED\|CANCEL_CLEANUP_FAILED\|TERMINATED\|TIMED_OUT", "node_statuses": {<node_id>: string}, "slurm_cancellation": <SlurmCancellationEvidence> \| null}` |
+| `POST` | `/workflow_status` | `{"workflow_id": string, "run_id": string \| null}` | Stable live/terminal status with identity, node attempts, Slurm job evidence, artifacts, cancellation, and reconciliation records. |
+| `POST` | `/admin/reconcile_slurm` | `{"workflow_id": string, "apply": false}` | Exact-workflow dry-run inventory. Set `apply` to `true` to cancel and verify only the recorded owned jobs. |
 
 ### Notes
 
 - `config` in `/start_workflow` is optional; if omitted, a default config is generated from the workflow. When present, it uses the same `executors` / `configs` / `node_configs` JSON format accepted by the CLI config file.
-- `request_id` and `workflow_id` make retried starts idempotent. Reusing an identity with materially different input returns HTTP `409`.
+- All five execution IDs are required. Retried starts are keyed by canonical JSON, so whitespace and object-key order do not change identity. Reusing a workflow ID with materially different input returns HTTP `409`.
 - `run_id` in `/stop_workflow` and `/workflow_status` is optional; if omitted, the latest run for the given `workflow_id` is used.
 - `/stop_workflow` requests cooperative cancellation. Slurm-backed workflows close as canceled only after owned jobs are reconciled, canceled, and verified absent.
-- Final node and Slurm cleanup evidence is persisted in Temporal memo, so terminal status does not depend on a live workflow query.
+- Final node, job, and cleanup evidence is persisted in Temporal memo and in `BWB_EVIDENCE_DIR`; status therefore remains available after Temporal retention expires.
 - When `BWB_API_BEARER_TOKEN` is configured, send `Authorization: Bearer <token>` on every request.
+- Administrative reconciliation requires `BWB_ADMIN_BEARER_TOKEN`, defaults to dry-run, and is available only for `CANCEL_CLEANUP_FAILED` workflows.
+
+### Slurm site profiles
+
+The Slurm executor accepts separate command and transfer ports, a known-hosts
+file plus an optional pinned SHA-256 host-key fingerprint, project and transfer
+root allowlists, and `singularity` or `apptainer` runtime selection. Job
+annotations support account, partition, QoS, reservation, wall time, nodes,
+tasks, tasks per node, CPUs, memory, GPUs, modules, and non-secret environment
+variables. Unknown fields and unsafe values are rejected.
+
+### Pre-merge acceptance
+
+`scripts/acceptance/run_premerge_acceptance.sh` builds with Go 1.24.4 and runs
+one of the `smoke`, `submission-loss`, `cleanup-failure`, `continue-as-new`, or
+`continue-as-new-cancel` scenarios. It writes redacted requests, API responses, Temporal history, Slurm
+accounting, binary identity, validation results, and checksums beneath the
+requested evidence root. Test-only failure hooks are inactive unless the
+harness explicitly sets their environment variables.
 
 
 # Code structure

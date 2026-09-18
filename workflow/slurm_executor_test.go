@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/testsuite"
 	"go.temporal.io/sdk/workflow"
 )
@@ -126,6 +127,7 @@ func TestSlurmExecutorFileDownloads(t *testing.T) {
 					ctx, &selector, localFS, storageId,
 					map[int]parsing.SlurmJobConfig{cmdToRun.Cmd.NodeId: configForCmd},
 					parsing.SshConfig{SchedDir: execToFs[parsing.EXEC_SLURM].GetRootDir()},
+					parsing.ExecutionIdentity{},
 				)
 
 				// Part of the "contract" of executors is that Setup()
@@ -189,6 +191,7 @@ func TestSlurmExecutorChildWorkflowFailure(t *testing.T) {
 		selector := workflow.NewSelector(ctx)
 		slurmExec := NewSlurmRemoteExecutor(
 			ctx, &selector, fs.LocalFS{}, "", nil, parsing.SshConfig{},
+			parsing.ExecutionIdentity{},
 		)
 
 		// Part of the "contract" of executors is that Setup()
@@ -228,18 +231,32 @@ func TestSlurmPollerWorkflowIDIsStableAndExecutionSpecific(t *testing.T) {
 		TransferAddr: "gpu.example.org",
 		SchedDir:     "/srv/slurm_mnt",
 	}
+	identity := parsing.ExecutionIdentity{
+		ExecutorID:    "executor-a",
+		SiteProfileID: "site-a",
+	}
 
-	first := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config)
-	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config); got != first {
+	first := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config, identity)
+	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config, identity); got != first {
 		t.Fatalf("poller workflow ID is not deterministic: %q != %q", got, first)
 	}
-	if got := slurmPollerWorkflowID("workflow-b", "run-b", "storage", config); got == first {
+	if got := slurmPollerWorkflowID("workflow-b", "run-b", "storage", config, identity); got == first {
 		t.Fatalf("different parent executions collided on poller ID %q", got)
 	}
 	changedSite := config
 	changedSite.SchedDir = "/srv/other-slurm"
-	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", changedSite); got == first {
+	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", changedSite, identity); got == first {
 		t.Fatalf("different Slurm site identities collided on poller ID %q", got)
+	}
+	changedIdentity := identity
+	changedIdentity.ExecutorID = "executor-b"
+	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config, changedIdentity); got == first {
+		t.Fatalf("different executor identities collided on poller ID %q", got)
+	}
+	changedIdentity = identity
+	changedIdentity.SiteProfileID = "site-b"
+	if got := slurmPollerWorkflowID("workflow-a", "run-a", "storage", config, changedIdentity); got == first {
+		t.Fatalf("different site profile identities collided on poller ID %q", got)
 	}
 }
 
@@ -254,4 +271,26 @@ func TestSlurmJobCorrelationKeyIsStableAndCommandSpecific(t *testing.T) {
 	if !slurmCorrelationPattern.MatchString(first) {
 		t.Fatalf("correlation key is not safe for Slurm: %q", first)
 	}
+}
+
+func TestSlurmExecutorCapturesCancellationEvidence(t *testing.T) {
+	expected := SlurmCancellationEvidence{
+		RequestedJobIDs: []string{"123"},
+		CleanupStatus:   "failed",
+		Verified:        false,
+		Error:           "injected Slurm cleanup failure",
+	}
+	exec := SlurmRemoteExecutor{}
+	err := exec.captureChildTermination(temporal.NewCanceledError(expected))
+	require.NoError(t, err)
+	require.Equal(t, &expected, exec.TerminalEvidence())
+}
+
+func TestSlurmExecutorCapturesUnexpectedChildFailure(t *testing.T) {
+	exec := SlurmRemoteExecutor{}
+	err := exec.captureChildTermination(fmt.Errorf("poller transport failed"))
+	require.ErrorContains(t, err, "Slurm poller shutdown failed")
+	require.Equal(t, "failed", exec.TerminalEvidence().CleanupStatus)
+	require.False(t, exec.TerminalEvidence().Verified)
+	require.Contains(t, exec.TerminalEvidence().Error, "poller transport failed")
 }

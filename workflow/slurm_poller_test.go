@@ -44,7 +44,10 @@ func TestCancelSlurmJobsRecoversManifestAndLeavesForeignJobsAlone(t *testing.T) 
 	runCmd := func(cmd string) (CmdOut, error) {
 		switch {
 		case strings.Contains(cmd, "submissions.tsv"):
-			return CmdOut{StdOut: "morphic-requested\t123\nmorphic-recovered\t456\n"}, nil
+			return CmdOut{StdOut: strings.Join([]string{
+				"morphic-requested\t123\thash-a\trequest-a\tworkflow-a\trun-a\texecutor-a\tprofile-a\t2026-09-18T00:00:00Z",
+				"morphic-recovered\t456\thash-b\trequest-b\tworkflow-b\trun-b\texecutor-b\tprofile-b\t2026-09-18T00:00:01Z",
+			}, "\n") + "\n"}, nil
 		case strings.HasPrefix(cmd, "squeue "):
 			var lines []string
 			for jobID, name := range active {
@@ -153,7 +156,11 @@ func TestSlurmPollerCancellationRunsDisconnectedCleanup(t *testing.T) {
 	if err := canceledErr.Details(&actual); err != nil {
 		t.Fatalf("failed decoding cancellation evidence: %v", err)
 	}
-	require.Equal(t, expectedEvidence, actual)
+	require.Equal(t, expectedEvidence.RequestedJobIDs, actual.RequestedJobIDs)
+	require.Equal(t, expectedEvidence.CorrelationKeys, actual.CorrelationKeys)
+	require.Equal(t, expectedEvidence.VerifiedTerminalIDs, actual.VerifiedTerminalIDs)
+	require.Equal(t, expectedEvidence.CleanupStatus, actual.CleanupStatus)
+	require.Equal(t, expectedEvidence.Verified, actual.Verified)
 	env.AssertExpectations(t)
 }
 
@@ -184,10 +191,10 @@ func TestSlurmResponse(t *testing.T) {
 	expSlurmJob := SlurmJob{CmdId: cmdId, JobId: jobId}
 
 	// StartRemoteSlurmJobActivity receives cmd, jobConfig, correlation key,
-	// filesystem, Slurm directory, and image directory.
+	// filesystem, Slurm directory, image directory, and execution identity.
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -262,7 +269,7 @@ func TestSlurmContinueAsNewStateMaintenance(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -327,6 +334,63 @@ func TestSlurmContinueAsNewStateMaintenance(t *testing.T) {
 	require.True(t, env.IsWorkflowCompleted())
 }
 
+func TestSlurmContinueAsNewCancellationUsesOriginalJob(t *testing.T) {
+	testSuite := &testsuite.WorkflowTestSuite{}
+	first := testSuite.NewTestWorkflowEnvironment()
+	initial := SlurmState{
+		ParentWfId:         "parent",
+		ContinueAsNewAfter: 1,
+		SlurmConfig: parsing.SshConfig{
+			User:     "tutorial",
+			SchedDir: "/srv/slurm_mnt",
+		},
+		RunningJobs: map[string]SlurmJob{
+			"123": {JobId: "123", CorrelationKey: "morphic-original"},
+		},
+		Requests: map[int]SlurmRequest{
+			1: {CorrelationKey: "morphic-original", Sequence: 1},
+		},
+		SubmissionSequence: 1,
+		JobEvidence: map[string]SlurmJobEvidence{
+			"123": {JobID: "123", CommandID: 1, Attempt: 1, CorrelationKey: "morphic-original"},
+		},
+	}
+	first.SetCurrentHistoryLength(2)
+	first.ExecuteWorkflow(SlurmPollerWorkflow, initial)
+	var continuedErr *workflow.ContinueAsNewError
+	if !errors.As(first.GetWorkflowError(), &continuedErr) {
+		t.Fatalf("first run did not continue as new: %v", first.GetWorkflowError())
+	}
+	var continued SlurmState
+	if err := converter.GetDefaultDataConverter().FromPayloads(continuedErr.Input, &continued); err != nil {
+		t.Fatal(err)
+	}
+	if continued.SubmissionSequence != 1 || continued.RunningJobs["123"].JobId != "123" {
+		t.Fatalf("active job state did not survive continue-as-new: %#v", continued)
+	}
+
+	var a SlurmActivity
+	second := testSuite.NewTestWorkflowEnvironment()
+	second.RegisterActivity(a.CancelRemoteSlurmJobsActivity)
+	second.OnActivity(
+		a.CancelRemoteSlurmJobsActivity,
+		mock.MatchedBy(func(request SlurmCancellationRequest) bool {
+			return reflect.DeepEqual(request.JobIDs, []string{"123"}) &&
+				strings.Contains(strings.Join(request.CorrelationKeys, ","), "morphic-original")
+		}),
+	).Return(SlurmCancellationEvidence{
+		RequestedJobIDs: []string{"123"}, VerifiedTerminalIDs: []string{"123"},
+		CleanupStatus: "verified", Verified: true,
+	}, nil).Once()
+	second.RegisterDelayedCallback(second.CancelWorkflow, time.Second)
+	continued.ContinueAsNewAfter = 9000
+	second.ExecuteWorkflow(SlurmPollerWorkflow, continued)
+	if !temporal.IsCanceledError(second.GetWorkflowError()) {
+		t.Fatalf("continued run did not cancel cleanly: %v", second.GetWorkflowError())
+	}
+	second.AssertExpectations(t)
+}
+
 // If a slurm job fails fatally (i.e. FAILED or CANCELLED), it
 // should immediately send notice of the job failure to the
 // calling workflow without any retries.
@@ -349,7 +413,7 @@ func TestSlurmJobFatalFailure(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Once()
 
 	// Handle workflow polling before request, which should be empty.
@@ -411,7 +475,7 @@ func TestSlurmJobNonFatalFailure(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Times(maxRetries + 1)
 
 	// Handle workflow polling before request, which should be empty.
@@ -473,7 +537,7 @@ func TestSlurmJobRetryOnNonFatalErr(t *testing.T) {
 
 	env.OnActivity(
 		a.StartRemoteSlurmJobActivity,
-		expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
+		mock.Anything, expCmd, expConfig, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything,
 	).Return(expSlurmJob, nil).Times(maxRetries + 1)
 
 	// Handle workflow polling before request, which should be empty.

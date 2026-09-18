@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -28,7 +29,14 @@ const TerminalEvidenceMemoKey = "bwb_terminal_evidence"
 type WorkflowTerminalEvidence struct {
 	WorkflowStatus    string                     `json:"workflow_status"`
 	NodeStatuses      map[int]string             `json:"node_statuses"`
+	NodeAttempts      map[int]int                `json:"node_attempts"`
 	SlurmCancellation *SlurmCancellationEvidence `json:"slurm_cancellation,omitempty"`
+	Identity          parsing.ExecutionIdentity  `json:"identity"`
+	SlurmTarget       *SlurmReconciliationTarget `json:"slurm_reconciliation_target,omitempty"`
+	ErrorCategory     string                     `json:"error_category,omitempty"`
+	ErrorDetail       string                     `json:"error_detail,omitempty"`
+	DeclaredArtifacts []string                   `json:"declared_artifacts,omitempty"`
+	SlurmJobs         []SlurmJobEvidence         `json:"slurm_jobs,omitempty"`
 }
 
 func terminalNodeStatuses(statuses map[int]string, canceled bool) map[int]string {
@@ -638,7 +646,7 @@ func setupExecutors(
 	if len(jobConfig.SlurmConfigsByNode) > 0 {
 		slurmExecutor := NewSlurmRemoteExecutor(
 			ctx, &selector, masterFS, storageId, jobConfig.SlurmConfigsByNode,
-			jobConfig.SlurmExecutor,
+			jobConfig.SlurmExecutor, jobConfig.ExecutionIdentity,
 		)
 		executorList = append(executorList, &slurmExecutor)
 		for nodeId := range jobConfig.SlurmConfigsByNode {
@@ -680,7 +688,7 @@ func RunBwbWorkflowHelper(
 	isDone func() bool,
 	selectFunc func(),
 	v1 bool,
-) error {
+) (returnErr error) {
 	if cmdMan == nil {
 		return errors.New("received nil CMD manager")
 	}
@@ -688,10 +696,19 @@ func RunBwbWorkflowHelper(
 	var finalErr error = nil
 	imageNames := cmdMan.GetImageNames()
 	fsByExec := make(map[int]fs.AbstractFileSystem)
+	initializedExecutors := make([]Executor, 0, len(executors))
+	defer func() {
+		for index := len(initializedExecutors) - 1; index >= 0; index-- {
+			if err := initializedExecutors[index].Shutdown(); err != nil {
+				returnErr = errors.Join(returnErr, err)
+			}
+		}
+	}()
 	for _, executor := range executors {
 		if err := executor.Setup(v1); err != nil {
 			return err
 		}
+		initializedExecutors = append(initializedExecutors, executor)
 
 		fsByExec[int(executor.GetID())] = executor.GetFS()
 
@@ -753,18 +770,8 @@ func RunBwbWorkflowHelper(
 		}
 	}
 
-	var shutdownErr error
-	for _, executor := range executors {
-		if err := executor.Shutdown(); err != nil && shutdownErr == nil {
-			shutdownErr = err
-		}
-	}
-
 	if finalErr != nil {
 		return finalErr
-	}
-	if shutdownErr != nil {
-		return shutdownErr
 	}
 
 	return nil
@@ -812,29 +819,86 @@ func RunBwbWorkflowV1(
 	)
 	evidence := WorkflowTerminalEvidence{
 		NodeStatuses: terminalNodeStatuses(cmdMan.GetNodeStatus(), ctx.Err() != nil),
+		NodeAttempts: make(map[int]int),
+		Identity:     jobConfig.ExecutionIdentity,
 	}
-	if runErr != nil || ctx.Err() != nil {
-		for _, executor := range executorList {
-			if provider, ok := executor.(interface {
-				TerminalEvidence() *SlurmCancellationEvidence
-			}); ok {
-				evidence.SlurmCancellation = provider.TerminalEvidence()
+	for _, executor := range executorList {
+		if provider, ok := executor.(interface {
+			TerminalEvidence() *SlurmCancellationEvidence
+		}); ok {
+			evidence.SlurmCancellation = provider.TerminalEvidence()
+			if evidence.SlurmCancellation != nil {
+				evidence.SlurmJobs = append(
+					evidence.SlurmJobs, evidence.SlurmCancellation.Jobs...,
+				)
 			}
 		}
+		if provider, ok := executor.(interface {
+			ReconciliationTarget() *SlurmReconciliationTarget
+		}); ok {
+			evidence.SlurmTarget = provider.ReconciliationTarget()
+		}
 	}
-	if runErr != nil && ctx.Err() != nil {
+	cleanupFailed := evidence.SlurmCancellation != nil &&
+		!evidence.SlurmCancellation.Verified &&
+		evidence.SlurmCancellation.CleanupStatus == "failed"
+	if cleanupFailed {
 		evidence.WorkflowStatus = "CANCEL_CLEANUP_FAILED"
-	} else if runErr != nil {
-		evidence.WorkflowStatus = "FAILED"
 	} else if ctx.Err() != nil {
 		evidence.WorkflowStatus = "CANCELED"
+	} else if runErr != nil {
+		evidence.WorkflowStatus = "FAILED"
 	} else {
 		evidence.WorkflowStatus = "FINISHED"
 	}
+	if cleanupFailed {
+		evidence.ErrorCategory = "slurm_cleanup"
+		evidence.ErrorDetail = redactOperationalError(evidence.SlurmCancellation.Error)
+	} else if runErr != nil && ctx.Err() == nil {
+		evidence.ErrorCategory = "workflow_execution"
+		evidence.ErrorDetail = redactOperationalError(runErr.Error())
+	}
+	artifactSet := make(map[string]struct{})
+	for nodeID := range evidence.NodeStatuses {
+		evidence.NodeAttempts[nodeID] = 1
+	}
+	for _, job := range evidence.SlurmJobs {
+		if job.Attempt > evidence.NodeAttempts[job.NodeID] {
+			evidence.NodeAttempts[job.NodeID] = job.Attempt
+		}
+		for _, artifact := range job.DeclaredArtifacts {
+			artifactSet[artifact] = struct{}{}
+		}
+	}
+	for artifact := range artifactSet {
+		evidence.DeclaredArtifacts = append(evidence.DeclaredArtifacts, artifact)
+	}
+	sort.Strings(evidence.DeclaredArtifacts)
 	if memoErr := workflow.UpsertMemo(ctx, map[string]interface{}{
 		TerminalEvidenceMemoKey: evidence,
 	}); memoErr != nil && runErr == nil {
 		return fmt.Errorf("failed persisting terminal workflow evidence: %w", memoErr)
+	}
+	if jobConfig.EvidenceDir != "" {
+		persistCtx, _ := workflow.NewDisconnectedContext(ctx)
+		persistCtx = workflow.WithActivityOptions(persistCtx, workflow.ActivityOptions{
+			TaskQueue:           SCHEDULER_QUEUE,
+			StartToCloseTimeout: 15 * time.Second,
+			RetryPolicy: &temporal.RetryPolicy{
+				MaximumAttempts: 3,
+			},
+		})
+		record := DurableWorkflowRecord{
+			Identity:         jobConfig.ExecutionIdentity,
+			TemporalRunID:    workflow.GetInfo(ctx).WorkflowExecution.RunID,
+			SlurmTarget:      evidence.SlurmTarget,
+			TerminalEvidence: &evidence,
+		}
+		if persistErr := workflow.ExecuteActivity(
+			persistCtx, PersistDurableWorkflowRecordActivity, jobConfig.EvidenceDir, record,
+		).Get(persistCtx, nil); persistErr != nil && runErr == nil {
+			return fmt.Errorf("failed persisting durable terminal evidence: %w", persistErr)
+		}
 	}
 	if runErr != nil {
 		return runErr

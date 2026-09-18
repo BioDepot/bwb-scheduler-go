@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"go-scheduler/fs"
 	"go-scheduler/parsing"
@@ -65,7 +66,9 @@ func StartWorker(
 		w.RegisterWorkflow(RunBwbWorkflowV0)
 		w.RegisterWorkflow(RunBwbWorkflowV1)
 		w.RegisterWorkflow(ResourceSchedulerWorkflow)
+		w.RegisterWorkflow(SlurmReconciliationWorkflow)
 		w.RegisterActivity(BuildSingularitySIF)
+		w.RegisterActivity(PersistDurableWorkflowRecordActivity)
 		w.RegisterActivity(fs.GlobActivity[fs.LocalFS])
 	} else {
 		w.RegisterActivity(WorkerHeartbeatActivity)
@@ -87,7 +90,7 @@ func StartSlurmWorker(
 	if err != nil {
 		log.Fatalf(
 			"error establishing ssh client to %s@%s: %s\n",
-			config.User, config.IpAddr, err,
+			config.User, config.CommandEndpoint(), err,
 		)
 	}
 
@@ -107,6 +110,7 @@ func StartSlurmWorker(
 	w.RegisterActivity(slurmActivityObj.GetRemoteSlurmJobOutputsActivity)
 	w.RegisterActivity(slurmActivityObj.PollRemoteSlurmActivity)
 	w.RegisterActivity(slurmActivityObj.CancelRemoteSlurmJobsActivity)
+	w.RegisterActivity(slurmActivityObj.ReconcileRemoteSlurmJobsActivity)
 	w.RegisterActivity(slurmActivityObj.StartRemoteSlurmJobActivity)
 	w.RegisterActivity(fs.SshDownloadActivity)
 	w.RegisterActivity(fs.SshUploadActivity)
@@ -138,7 +142,7 @@ func getSshConnection(conf parsing.SshConfig) (*ssh.Client, *ssh.ClientConfig, e
 		HostKeyCallback: hostKeyCallback,
 	}
 
-	client, err := ssh.Dial("tcp", conf.IpAddr, connConfig)
+	client, err := ssh.Dial("tcp", conf.CommandEndpoint(), connConfig)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error connecting to server: %s", err)
 	}
@@ -248,5 +252,24 @@ func getHostKeyCallback(conf parsing.SshConfig) (ssh.HostKeyCallback, error) {
 		}
 		khPath = filepath.Join(usr.HomeDir, ".ssh", "known_hosts")
 	}
-	return knownhosts.New(khPath)
+	knownHostsCallback, err := knownhosts.New(khPath)
+	if err != nil {
+		return nil, err
+	}
+	if conf.ExpectedHostKeyFingerprint == "" {
+		return knownHostsCallback, nil
+	}
+	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
+		if err := knownHostsCallback(hostname, remote, key); err != nil {
+			return err
+		}
+		actual := ssh.FingerprintSHA256(key)
+		expected := conf.ExpectedHostKeyFingerprint
+		if len(actual) != len(expected) || subtle.ConstantTimeCompare(
+			[]byte(actual), []byte(expected),
+		) != 1 {
+			return fmt.Errorf("SSH host-key fingerprint mismatch for %s", hostname)
+		}
+		return nil
+	}, nil
 }

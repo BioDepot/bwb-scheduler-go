@@ -52,3 +52,31 @@ func TestWriteSbatchFileExportsSiteEnvironmentDeterministically(t *testing.T) {
 		t.Fatalf("environment exports are not sorted:\n%s", text)
 	}
 }
+
+func TestWriteSbatchFileEmitsExtendedSiteOptions(t *testing.T) {
+	partition, account, qos, reservation := "RM-shared", "project-1", "normal", "reservation-1"
+	tasksPerNode := 2
+	config := parsing.SlurmJobConfig{
+		Partition: &partition, Account: &account, QOS: &qos,
+		Reservation: &reservation, TasksPerNode: &tasksPerNode,
+	}
+	var output bytes.Buffer
+	_, _, err := WriteSbatchFile(
+		&output, parsing.CmdTemplate{ResourceReqs: parsing.ResourceVector{Cpus: 1, MemMb: 1024}},
+		map[string]string{}, parsing.SshConfig{ContainerRuntime: "apptainer"}, config,
+		"/slurm", "/images", "job-1", "morphic-test-job",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	for _, expected := range []string{
+		"#SBATCH --account=project-1", "#SBATCH --qos=normal",
+		"#SBATCH --reservation=reservation-1", "#SBATCH --ntasks-per-node=2",
+		"apptainer exec",
+	} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("missing %q in sbatch file:\n%s", expected, text)
+		}
+	}
+}

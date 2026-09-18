@@ -28,6 +28,7 @@ type SlurmRemoteExecutor struct {
 	handleFinishedCmd CmdHandler
 	handleFileXfers   FileXferHandler
 	configsByNode     map[int]parsing.SlurmJobConfig
+	identity          parsing.ExecutionIdentity
 	schedDir          string
 	selector          *workflow.Selector
 	slurmPollerWE     workflow.Execution
@@ -41,6 +42,7 @@ func NewSlurmRemoteExecutor(
 	masterFS fs.LocalFS, storageId string,
 	configsByNode map[int]parsing.SlurmJobConfig,
 	sshConfig parsing.SshConfig,
+	identity parsing.ExecutionIdentity,
 ) SlurmRemoteExecutor {
 	var state SlurmRemoteExecutor
 	state.ctx = ctx
@@ -52,6 +54,7 @@ func NewSlurmRemoteExecutor(
 	state.sshConfig = sshConfig
 	state.schedDir = sshConfig.SchedDir
 	state.configsByNode = configsByNode
+	state.identity = identity
 	return state
 }
 
@@ -67,6 +70,12 @@ func (exec *SlurmRemoteExecutor) setupFS(v1 bool) (fs.SshFS, error) {
 	// Setup container filesystem on SLURM fs.
 	var a SlurmActivity
 	dataDir := filepath.Join(exec.schedDir, exec.storageId)
+	if len(exec.sshConfig.AllowedTransferRoots) > 0 &&
+		!pathWithinRoots(dataDir, exec.sshConfig.AllowedTransferRoots) {
+		return fs.SshFS{}, fmt.Errorf(
+			"Slurm transfer path %q is outside configured allowed transfer roots", dataDir,
+		)
+	}
 	ao := workflow.ActivityOptions{
 		TaskQueue:           GetTemporalSshQueueName(exec.sshConfig),
 		StartToCloseTimeout: 10 * time.Minute,
@@ -135,6 +144,7 @@ func (exec *SlurmRemoteExecutor) Setup(v1 bool) error {
 	schedChildWfOptions := workflow.ChildWorkflowOptions{
 		WorkflowID: slurmPollerWorkflowID(
 			parentInfo.ID, parentInfo.RunID, exec.storageId, exec.sshConfig,
+			exec.identity,
 		),
 		TaskQueue:           queueName,
 		WaitForCancellation: true,
@@ -146,21 +156,33 @@ func (exec *SlurmRemoteExecutor) Setup(v1 bool) error {
 	workflowRunId := workflow.GetInfo(exec.ctx).WorkflowExecution.RunID
 	exec.slurmPollerFuture = workflow.ExecuteChildWorkflow(
 		childCtx, SlurmPollerWorkflow, SlurmState{
-			ParentWfId:    workflowId,
-			ParentWfRunId: workflowRunId,
-			SlurmConfig:   exec.sshConfig,
-			StorageId:     exec.storageId,
-			SchedDir:      exec.schedDir,
-			SlurmFS:       slurmFS,
+			ParentWfId:         workflowId,
+			ParentWfRunId:      workflowRunId,
+			SlurmConfig:        exec.sshConfig,
+			StorageId:          exec.storageId,
+			SchedDir:           exec.schedDir,
+			SlurmFS:            slurmFS,
+			Identity:           exec.identity,
+			ContinueAsNewAfter: exec.sshConfig.PollerContinueAsNewHistoryLength,
 		},
 	)
+	exec.cancelChild = cancelChild
 
 	err = exec.slurmPollerFuture.GetChildWorkflowExecution().Get(exec.ctx, &exec.slurmPollerWE)
 	if err != nil {
+		if exec.ctx.Err() != nil {
+			disconnectedCtx, _ := workflow.NewDisconnectedContext(exec.ctx)
+			childErr := exec.slurmPollerFuture.Get(disconnectedCtx, nil)
+			if evidenceErr := exec.captureChildTermination(childErr); evidenceErr != nil {
+				return fmt.Errorf(
+					"failed getting child WF execution: %v; cleanup failed: %w",
+					err, evidenceErr,
+				)
+			}
+		}
 		outErr := fmt.Errorf("failed getting child WF execution: %s", err)
 		return outErr
 	}
-	exec.cancelChild = cancelChild
 
 	slurmJobResChan := workflow.GetSignalChannel(exec.ctx, "slurm-response")
 	(*exec.selector).AddReceive(slurmJobResChan, func(c workflow.ReceiveChannel, _ bool) {
@@ -271,6 +293,10 @@ func (exec *SlurmRemoteExecutor) Shutdown() error {
 	exec.cancelChild()
 	disconnectedCtx, _ := workflow.NewDisconnectedContext(exec.ctx)
 	err := exec.slurmPollerFuture.Get(disconnectedCtx, nil)
+	return exec.captureChildTermination(err)
+}
+
+func (exec *SlurmRemoteExecutor) captureChildTermination(err error) error {
 	if err == nil {
 		return nil
 	}
@@ -297,20 +323,38 @@ func (exec *SlurmRemoteExecutor) TerminalEvidence() *SlurmCancellationEvidence {
 	return exec.cancellation
 }
 
+func (exec *SlurmRemoteExecutor) ReconciliationTarget() *SlurmReconciliationTarget {
+	if exec.cancellation == nil {
+		return nil
+	}
+	return &SlurmReconciliationTarget{
+		Config: exec.sshConfig,
+		Request: SlurmCancellationRequest{
+			JobIDs:          append([]string(nil), exec.cancellation.RequestedJobIDs...),
+			CorrelationKeys: append([]string(nil), exec.cancellation.CorrelationKeys...),
+			ManifestPath:    exec.cancellation.ManifestPath,
+			User:            exec.cancellation.SubmittingUser,
+		},
+	}
+}
+
 func slurmPollerWorkflowID(
 	parentWorkflowID, parentRunID, storageID string, config parsing.SshConfig,
+	identity parsing.ExecutionIdentity,
 ) string {
-	identity := strings.Join([]string{
+	canonicalIdentity := strings.Join([]string{
 		parentWorkflowID,
 		parentRunID,
 		storageID,
 		config.User,
-		config.IpAddr,
+		config.CommandEndpoint(),
 		config.TransferAddr,
 		fmt.Sprintf("%d", config.TransferPort),
 		config.SchedDir,
+		identity.ExecutorID,
+		identity.SiteProfileID,
 	}, "\x00")
-	sum := sha256.Sum256([]byte(identity))
+	sum := sha256.Sum256([]byte(canonicalIdentity))
 	prefix := safeWorkflowIDComponent(parentWorkflowID)
 	if len(prefix) > 24 {
 		prefix = prefix[:24]

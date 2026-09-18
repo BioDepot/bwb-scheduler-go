@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"go-scheduler/parsing"
 	"go-scheduler/workflow"
 	"net/http"
@@ -177,6 +178,71 @@ func TestRegisteredRoutesRequireConfiguredBearerToken(t *testing.T) {
 	}
 }
 
+func TestAdminReconciliationRequiresSeparateToken(t *testing.T) {
+	server := &Server{bearerToken: "ordinary", adminToken: "administrator"}
+	mux := http.NewServeMux()
+	server.RegisterRoutes(mux)
+
+	ordinaryRequest := httptest.NewRequest(
+		http.MethodPost, "/admin/reconcile_slurm", strings.NewReader(`{"workflow_id":"workflow-1"}`),
+	)
+	ordinaryRequest.Header.Set("Authorization", "Bearer ordinary")
+	ordinary := httptest.NewRecorder()
+	mux.ServeHTTP(ordinary, ordinaryRequest)
+	if ordinary.Code != http.StatusUnauthorized {
+		t.Fatalf("ordinary bearer reached administrator endpoint: %d", ordinary.Code)
+	}
+
+	adminRequest := httptest.NewRequest(
+		http.MethodPost, "/admin/reconcile_slurm", strings.NewReader(`{"workflow_id":"workflow-1"}`),
+	)
+	adminRequest.Header.Set("Authorization", "Bearer administrator")
+	admin := httptest.NewRecorder()
+	mux.ServeHTTP(admin, adminRequest)
+	if admin.Code != http.StatusServiceUnavailable {
+		t.Fatalf("administrator token did not reach handler: %d", admin.Code)
+	}
+}
+
+func TestWorkflowStatusUsesDurableFallback(t *testing.T) {
+	root := t.TempDir()
+	identity := parsing.ExecutionIdentity{
+		RequestID: "request-1", WorkflowID: "workflow-1",
+		WorkbenchRunID: "workbench-1", ExecutorID: "executor-1", SiteProfileID: "site-1",
+	}
+	if err := workflow.WriteDurableWorkflowRecord(root, workflow.DurableWorkflowRecord{
+		Identity: identity,
+		TerminalEvidence: &workflow.WorkflowTerminalEvidence{
+			WorkflowStatus: "CANCELED",
+			NodeStatuses:   map[int]string{10: "CANCELED"},
+			Identity:       identity,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	temporalClient := &temporalmocks.Client{}
+	temporalClient.On(
+		"DescribeWorkflowExecution", mock.Anything, "workflow-1", "",
+	).Return((*workflowservice.DescribeWorkflowExecutionResponse)(nil), errors.New("not retained")).Once()
+	server := &Server{temporalClient: temporalClient, evidenceDir: root}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(
+		http.MethodPost, "/workflow_status", strings.NewReader(`{"workflow_id":"workflow-1"}`),
+	)
+	server.handleWorkflowStatus(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("durable fallback returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response WorkflowStatusResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.WorkflowStatus != "CANCELED" || response.NodeStatuses[10] != "CANCELED" || response.SiteProfileID != "site-1" {
+		t.Fatalf("unexpected fallback response: %#v", response)
+	}
+	temporalClient.AssertExpectations(t)
+}
+
 func TestTerminalEvidenceMemoRoundTrip(t *testing.T) {
 	expected := workflow.WorkflowTerminalEvidence{
 		WorkflowStatus: "CANCELED",
@@ -213,6 +279,9 @@ func TestStartRequestFingerprintDetectsMaterialChanges(t *testing.T) {
 		ResolvedWorkflow: json.RawMessage(`{"nodes":{}}`),
 		RequestID:        "request-1",
 		WorkflowID:       "workflow-1",
+		WorkbenchRunID:   "workbench-1",
+		ExecutorID:       "executor-1",
+		SiteProfileID:    "site-1",
 	}
 	first, err := startRequestFingerprint(request)
 	if err != nil {
@@ -226,5 +295,70 @@ func TestStartRequestFingerprintDetectsMaterialChanges(t *testing.T) {
 	changed, _ := startRequestFingerprint(request)
 	if changed == first {
 		t.Fatal("materially different request retained the same fingerprint")
+	}
+}
+
+func TestStartRequestFingerprintCanonicalizesJSON(t *testing.T) {
+	first := StartWorkflowRequest{
+		Schema:           "biodepot.resolved_workflow/v1",
+		ResolvedWorkflow: json.RawMessage(`{"nodes":{"2":{"name":"b"},"1":{"name":"a"}}}`),
+		Config:           json.RawMessage(`{"b":2,"a":1}`),
+		RequestID:        "request-1",
+		WorkflowID:       "workflow-1",
+		WorkbenchRunID:   "workbench-1",
+		ExecutorID:       "executor-1",
+		SiteProfileID:    "site-1",
+	}
+	second := first
+	second.ResolvedWorkflow = json.RawMessage(`{
+		"nodes": {"1": {"name": "a"}, "2": {"name": "b"}}
+	}`)
+	second.Config = json.RawMessage(`{ "a": 1, "b": 2 }`)
+
+	firstFingerprint, err := startRequestFingerprint(first)
+	if err != nil {
+		t.Fatalf("failed fingerprinting first request: %v", err)
+	}
+	secondFingerprint, err := startRequestFingerprint(second)
+	if err != nil {
+		t.Fatalf("failed fingerprinting second request: %v", err)
+	}
+	if firstFingerprint != secondFingerprint {
+		t.Fatalf("semantically equivalent JSON produced different fingerprints: %q != %q", firstFingerprint, secondFingerprint)
+	}
+}
+
+func TestValidatedExecutionIdentityRequiresAllFields(t *testing.T) {
+	valid := StartWorkflowRequest{
+		RequestID:      "request-1",
+		WorkflowID:     "workflow-1",
+		WorkbenchRunID: "workbench-1",
+		ExecutorID:     "executor-1",
+		SiteProfileID:  "site-1",
+	}
+	if _, err := validatedExecutionIdentity(valid); err != nil {
+		t.Fatalf("valid identity rejected: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*StartWorkflowRequest)
+		want   string
+	}{
+		{"request", func(r *StartWorkflowRequest) { r.RequestID = "" }, "request_id is required"},
+		{"workflow", func(r *StartWorkflowRequest) { r.WorkflowID = "" }, "workflow_id is required"},
+		{"workbench", func(r *StartWorkflowRequest) { r.WorkbenchRunID = "" }, "workbench_run_id is required"},
+		{"executor", func(r *StartWorkflowRequest) { r.ExecutorID = "" }, "executor_id is required"},
+		{"site", func(r *StartWorkflowRequest) { r.SiteProfileID = "" }, "site_profile_id is required"},
+		{"malformed", func(r *StartWorkflowRequest) { r.ExecutorID = "bad value" }, `invalid executor_id "bad value"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			request := valid
+			tc.mutate(&request)
+			if _, err := validatedExecutionIdentity(request); err == nil || err.Error() != tc.want {
+				t.Fatalf("validation error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
