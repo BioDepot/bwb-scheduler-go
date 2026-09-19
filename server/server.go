@@ -135,6 +135,8 @@ func (s *Server) Close() {
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/start_workflow", s.authenticated(s.handleStartWorkflow))
+	mux.HandleFunc("/start_staged_slurm_gpu_workflow", s.authenticated(s.handleStartStagedWorkflow))
+	mux.HandleFunc("/staged_slurm_gpu_workflow_status", s.authenticated(s.handleStagedWorkflowStatus))
 	mux.HandleFunc("/stop_workflow", s.authenticated(s.handleStopWorkflow))
 	mux.HandleFunc("/workflow_status", s.authenticated(s.handleWorkflowStatus))
 	mux.HandleFunc("/admin/reconcile_slurm", s.adminAuthenticated(s.handleReconcileSlurm))
