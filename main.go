@@ -8,6 +8,7 @@ import (
 	"go-scheduler/fs"
 	"go-scheduler/parsing"
 	"go-scheduler/server"
+	"go-scheduler/staged"
 	"go-scheduler/workflow"
 	"log"
 	"log/slog"
@@ -822,6 +823,69 @@ func main() {
 	rootCmd.AddCommand(dryRunCmd)
 	rootCmd.AddCommand(convertOWSCmd)
 	rootCmd.AddCommand(workersCmd)
+	var stagedConfig, stagedSiteConfig string
+	stagedWorkersCmd := &cobra.Command{
+		Use:   "staged-workers",
+		Short: "Start Go Temporal workers for the Globus/Slurm/GPU staged handoff",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			config, err := staged.LoadConfig(stagedConfig, stagedSiteConfig)
+			if err != nil {
+				return err
+			}
+			logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+			c, err := client.NewClient(temporalClientOptions(logger))
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+			workers, err := staged.StartWorkers(c, config)
+			if err != nil {
+				return err
+			}
+			logger.Info("staged workers started", "orchestration_queue", config.Pipeline.TaskQueue, "slurm_queue", config.Executors.Slurm.Queue(), "gpu_queue", config.Executors.SSHDocker.Queue())
+			sigs := make(chan os.Signal, 1)
+			signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+			<-sigs
+			for _, w := range workers {
+				w.Stop()
+			}
+			return nil
+		},
+	}
+	stagedWorkersCmd.Flags().StringVar(&stagedConfig, "config", "", "Worker configuration JSON with pipeline queue and Globus allowlist")
+	stagedWorkersCmd.Flags().StringVar(&stagedSiteConfig, "site-config", "", "Site configuration JSON with Slurm and SSH/Docker targets")
+	stagedWorkersCmd.MarkFlagRequired("config")
+	stagedWorkersCmd.MarkFlagRequired("site-config")
+	rootCmd.AddCommand(stagedWorkersCmd)
+	var stagedRequestPath string
+	validateStagedCmd := &cobra.Command{
+		Use:   "validate-staged-request",
+		Short: "Validate a Python-compatible staged request without submitting it",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := os.Open(stagedRequestPath)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			var req staged.Request
+			decoder := json.NewDecoder(f)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&req); err != nil {
+				return err
+			}
+			req.Normalize()
+			if err := req.Validate(); err != nil {
+				return err
+			}
+			fmt.Printf("valid staged request: workflow=%s queue=%s globus=%s slurm=%t gpu=%t\n", req.WorkflowID, req.TaskQueue, req.GlobusTaskQueue, req.Slurm != nil, req.GPU != nil)
+			return nil
+		},
+	}
+	validateStagedCmd.Flags().StringVar(&stagedRequestPath, "file", "", "Staged scheduler JSON request")
+	validateStagedCmd.MarkFlagRequired("file")
+	rootCmd.AddCommand(validateStagedCmd)
 	rootCmd.AddCommand(serveCmd)
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalln(err)

@@ -25,7 +25,7 @@ This scheduler is based on Temporal.io workflow framework with key modifications
 
 ## CLI
 
-**Note**: All CLI commands expect `BWB_SCHED_DIR` to be set as an environment variable; this will be mounted to `/data/` locally. (If using a storage ID to isolate workflow FSs, then `BWB_SCHED_DIR/[storageID]` will be mounted instead). Files should be staged here before running.
+**Note**: The resolved BWB workflow commands expect `BWB_SCHED_DIR` to be set; this will be mounted to `/data/` locally. (If using a storage ID to isolate workflow FSs, then `BWB_SCHED_DIR/[storageID]` will be mounted instead). The staged handoff commands use their site-configured storage roots instead.
 
 ### OWS to JSON conversion
 ```
@@ -111,6 +111,57 @@ The API, CLI Temporal mode, and workers share these settings:
 
 Use a dedicated Temporal namespace when testing a worker implementation that
 shares task queue names with an existing deployment.
+
+### Staged Globus/Slurm/GPU workflow
+
+The Go scheduler also accepts the Python scheduler's
+`/start_staged_slurm_gpu_workflow` and
+`/staged_slurm_gpu_workflow_status` API contract. Stages run in order:
+Globus stage-in, raw Slurm script, Globus stage-back, SSH/Docker GPU job,
+Globus publish. Each stage is optional. The existing `/stop_workflow` route
+requests Temporal cancellation, with Slurm `scancel` and named Docker-container
+cleanup for active stages. This is separate from the resolved BWB workflow API.
+
+Validate a Workbench-generated request without starting jobs:
+
+```bash
+bwbScheduler validate-staged-request --file scheduler-request.dry-run.json
+```
+
+Start the site workers using the same Temporal address/namespace as `serve`
+in separate processes:
+
+```bash
+# terminal 1
+bwbScheduler staged-workers --config worker_config.json --site-config site_config.json
+# terminal 2
+bwbScheduler serve --addr :8080
+```
+
+`worker_config.json` supplies `pipeline.task_queue`, optional
+`pipeline.globus_task_queue`, and `executors.globus.cli_path` plus a nonempty
+`allowed_endpoint_ids` list. `site_config.json` supplies
+`executors.slurm` and `executors.ssh_docker`, each with `user`, `ip_addr`,
+`port`, and absolute `storage_dir`. The GPU site additionally requires
+`allowed_roots` for local inputs and downloaded outputs. Optional
+`identity_file` and `known_hosts_file` select SSH credentials; host-key
+checking is strict. The scheduler uses native gzip inputs and does not
+transcode them. CellBender requests are rejected unless they specify both
+`use_gpu: true` and `--cuda`.
+
+For the cardiac pilot, a Go site config can reuse the Python Slurm and
+SSH/Docker targets, but must add an explicit GPU-local root, for example
+`"allowed_roots": ["/mnt/pikachu/MSK_Perturbseq06_Cardiac_temporal_workbench_20260918T213950Z"]`
+under `executors.ssh_docker`. Include every local input/output root the GPU
+stage will touch. The pilot request is at
+`/mnt/pikachu/morphic-provenance-msk-temporal-workbench/runs/msk_perturbseq06_cardiac/20260918T213950Z_temporal_workbench_pilot/outputs/scheduler-request.dry-run.json`.
+
+The submitted JSON must name the orchestration, Globus, Slurm, and GPU task
+queues to match the workers. Point the Workbench scheduler URL at the Go
+`serve` address only after a separate-namespace acceptance run. The Go API
+returns the same `workflow_id`, `run_id`, `task_queue` start fields and staged
+status/result field names as the Python API. No transfer or job starts during
+`validate-staged-request`.
 
 
 ## Example usage
