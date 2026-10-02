@@ -71,9 +71,7 @@ func StartWorker(
 		w.RegisterActivity(PersistDurableWorkflowRecordActivity)
 		w.RegisterActivity(fs.GlobActivity[fs.LocalFS])
 	} else {
-		w.RegisterActivity(WorkerHeartbeatActivity)
-		w.RegisterActivity(RunCmdActivity)
-		w.RegisterActivity(fs.SetupRootDir)
+		registerCmdWorkerActivities(w)
 	}
 
 	log.Println("Starting worker...")
@@ -81,6 +79,28 @@ func StartWorker(
 	if err != nil {
 		log.Fatalln("Unable to start worker", err)
 	}
+}
+
+type activityRegistry interface {
+	RegisterActivity(interface{})
+}
+
+// registerCmdWorkerActivities registers what a worker that runs commands on its
+// own host must serve. That includes the transfers: an input produced on
+// another executor is fetched by the worker that will read it, so that it
+// lands on that worker's file system.
+func registerCmdWorkerActivities(r activityRegistry) {
+	r.RegisterActivity(WorkerHeartbeatActivity)
+	r.RegisterActivity(RunCmdActivity)
+	r.RegisterActivity(fs.SetupRootDir)
+	registerXferActivities(r)
+}
+
+func registerXferActivities(r activityRegistry) {
+	r.RegisterActivity(fs.TransferLocalToLocalFS)
+	r.RegisterActivity(fs.TransferLocalToSshFS)
+	r.RegisterActivity(fs.TransferSshToLocalFS)
+	r.RegisterActivity(fs.TransferSshToSshFS)
 }
 
 func StartSlurmWorker(
@@ -114,10 +134,7 @@ func StartSlurmWorker(
 	w.RegisterActivity(slurmActivityObj.StartRemoteSlurmJobActivity)
 	w.RegisterActivity(fs.SshDownloadActivity)
 	w.RegisterActivity(fs.SshUploadActivity)
-	w.RegisterActivity(fs.TransferLocalToLocalFS)
-	w.RegisterActivity(fs.TransferLocalToSshFS)
-	w.RegisterActivity(fs.TransferSshToLocalFS)
-	w.RegisterActivity(fs.TransferSshToSshFS)
+	registerXferActivities(w)
 	log.Println("Starting worker...")
 	err = w.Run(cancelChan)
 	if err != nil {
