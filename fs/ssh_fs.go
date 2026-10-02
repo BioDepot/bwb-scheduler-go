@@ -180,18 +180,39 @@ func rsyncOperands(src, dst string, isDir bool) (string, string) {
 	return strings.TrimRight(src, "/") + "/", strings.TrimRight(dst, "/") + "/"
 }
 
-// remoteIsDir reports whether the remote path is a directory. The path has
-// been validated as absolute, so it cannot be taken for an option of test.
+// remoteIsDir reports whether the remote path is a directory. It asks rsync,
+// the one program a transfer endpoint must offer, and does not run `test -d`
+// over SSH: a data-transfer node with a command whitelist refuses `test` with
+// exit status 1, which is also how `test -d` says "not a directory", so a
+// directory would be copied as a file and land one level too deep.
 func (fs SshFS) remoteIsDir(path string) (bool, error) {
-	testArgs := append(fs.sshArgs(), fs.remoteTarget(), "test -d "+shellQuote(path))
-	testOut, err := runLocalCommand("ssh", testArgs...)
-	if err == nil {
-		return true, nil
+	transport := []string{"-s", "-e", strings.Join(append([]string{"ssh"}, quoteCommandArgs(fs.sshArgs())...), " ")}
+	return rsyncEntryIsDir(transport, fs.rsyncRemoteSpec(path))
+}
+
+// rsyncEntryIsDir lists the entry spec itself (-d: without its contents; -L: a
+// link counts as what it points to, as with `test -d`) and reports whether
+// rsync shows it as a directory. A path that does not exist is not a
+// directory; the copy that follows reports it.
+func rsyncEntryIsDir(transportArgs []string, spec string) (bool, error) {
+	args := append([]string{"--list-only", "-d", "-L"}, transportArgs...)
+	args = append(args, spec)
+	out, err := runLocalCommand("rsync", args...)
+	if err != nil {
+		// 23: "some files/attrs were not transferred", which is what rsync
+		// returns when the path does not exist.
+		if out.ExitCode == 23 {
+			return false, nil
+		}
+		return false, fmt.Errorf("rsync listing failed for %s: %s: %s", spec, err, strings.TrimSpace(out.StdErr))
 	}
-	if testOut.ExitCode == 1 {
-		return false, nil
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return strings.HasPrefix(line, "d"), nil
 	}
-	return false, fmt.Errorf("remote test failed for %s: %s: %s", path, err, strings.TrimSpace(testOut.StdErr))
+	return false, fmt.Errorf("rsync listing of %s returned nothing", spec)
 }
 
 func (fs SshFS) validateRemotePath(path string) error {
