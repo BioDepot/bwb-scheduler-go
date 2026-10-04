@@ -114,21 +114,31 @@ func (fs SshFS) Glob(
 	//return out, nil
 }
 
+// Upload copies the local file or directory src to the remote path dst.
 func (fs SshFS) Upload(src, dst string) error {
 	if err := fs.validateRemotePath(dst); err != nil {
 		return err
 	}
-	parent := filepath.Dir(dst)
-	mkdirArgs := append(fs.sshArgs(), fs.remoteTarget(), "mkdir -p -- "+shellQuote(parent))
+	info, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("cannot upload %s: %w", src, err)
+	}
+	// A directory is created itself; for a file only its parent is.
+	remoteDir := filepath.Dir(dst)
+	if info.IsDir() {
+		remoteDir = dst
+	}
+	mkdirArgs := append(fs.sshArgs(), fs.remoteTarget(), "mkdir -p -- "+shellQuote(remoteDir))
 	mkdirOut, err := runLocalCommand("ssh", mkdirArgs...)
 	if err != nil {
-		return fmt.Errorf("remote mkdir failed for %s: %s: %s", parent, err, strings.TrimSpace(mkdirOut.StdErr))
+		return fmt.Errorf("remote mkdir failed for %s: %s: %s", remoteDir, err, strings.TrimSpace(mkdirOut.StdErr))
 	}
 
 	// NOTE: We cannot use rsync --mkpath, since some versions
 	// do not support this.
+	rsyncSrc, rsyncDst := rsyncOperands(src, dst, info.IsDir())
 	rsyncArgs := []string{"-av", "-s", "-e", strings.Join(append([]string{"ssh"}, quoteCommandArgs(fs.sshArgs())...), " ")}
-	rsyncArgs = append(rsyncArgs, src, fs.rsyncRemoteSpec(dst))
+	rsyncArgs = append(rsyncArgs, rsyncSrc, fs.rsyncRemoteSpec(rsyncDst))
 	rsyncOut, err := runLocalCommand("rsync", rsyncArgs...)
 	if err != nil {
 		return fmt.Errorf("rsync upload failed for %s: %s: %s", dst, err, strings.TrimSpace(rsyncOut.StdErr))
@@ -136,22 +146,73 @@ func (fs SshFS) Upload(src, dst string) error {
 	return nil
 }
 
+// Download copies the remote file or directory src to the local path dst.
 func (fs SshFS) Download(src, dst string) error {
 	if err := fs.validateRemotePath(src); err != nil {
 		return err
 	}
+	isDir, err := fs.remoteIsDir(src)
+	if err != nil {
+		return err
+	}
 	parent := filepath.Dir(dst)
-	err := os.MkdirAll(parent, 0755)
+	err = os.MkdirAll(parent, 0755)
 	if err != nil {
 		return fmt.Errorf("failed to make parent dir %s of dst %s", parent, dst)
 	}
+	rsyncSrc, rsyncDst := rsyncOperands(src, dst, isDir)
 	rsyncArgs := []string{"--mkpath", "-av", "-s", "-e", strings.Join(append([]string{"ssh"}, quoteCommandArgs(fs.sshArgs())...), " ")}
-	rsyncArgs = append(rsyncArgs, fs.rsyncRemoteSpec(src), dst)
+	rsyncArgs = append(rsyncArgs, fs.rsyncRemoteSpec(rsyncSrc), rsyncDst)
 	rsyncOut, err := runLocalCommand("rsync", rsyncArgs...)
 	if err != nil {
 		return fmt.Errorf("rsync download failed for %s: %s: %s", src, err, strings.TrimSpace(rsyncOut.StdErr))
 	}
 	return nil
+}
+
+// rsyncOperands returns the source and destination operands for copying src
+// to dst. Both get a trailing slash for a directory, so that rsync copies its
+// contents into dst instead of creating dst/<name of src>.
+func rsyncOperands(src, dst string, isDir bool) (string, string) {
+	if !isDir {
+		return src, dst
+	}
+	return strings.TrimRight(src, "/") + "/", strings.TrimRight(dst, "/") + "/"
+}
+
+// remoteIsDir reports whether the remote path is a directory. It asks rsync,
+// the one program a transfer endpoint must offer, and does not run `test -d`
+// over SSH: a data-transfer node with a command whitelist refuses `test` with
+// exit status 1, which is also how `test -d` says "not a directory", so a
+// directory would be copied as a file and land one level too deep.
+func (fs SshFS) remoteIsDir(path string) (bool, error) {
+	transport := []string{"-s", "-e", strings.Join(append([]string{"ssh"}, quoteCommandArgs(fs.sshArgs())...), " ")}
+	return rsyncEntryIsDir(transport, fs.rsyncRemoteSpec(path))
+}
+
+// rsyncEntryIsDir lists the entry spec itself (-d: without its contents; -L: a
+// link counts as what it points to, as with `test -d`) and reports whether
+// rsync shows it as a directory. A path that does not exist is not a
+// directory; the copy that follows reports it.
+func rsyncEntryIsDir(transportArgs []string, spec string) (bool, error) {
+	args := append([]string{"--list-only", "-d", "-L"}, transportArgs...)
+	args = append(args, spec)
+	out, err := runLocalCommand("rsync", args...)
+	if err != nil {
+		// 23: "some files/attrs were not transferred", which is what rsync
+		// returns when the path does not exist.
+		if out.ExitCode == 23 {
+			return false, nil
+		}
+		return false, fmt.Errorf("rsync listing failed for %s: %s: %s", spec, err, strings.TrimSpace(out.StdErr))
+	}
+	for _, line := range strings.Split(out.StdOut, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		return strings.HasPrefix(line, "d"), nil
+	}
+	return false, fmt.Errorf("rsync listing of %s returned nothing", spec)
 }
 
 func (fs SshFS) validateRemotePath(path string) error {

@@ -57,6 +57,37 @@ func GetV0CntPath(hostPath, dataHostDir string) (string, bool) {
     return path.Join("/data", filepath.ToSlash(rel)), true
 }
 
+// Transfer copies each path, a file or a directory, from srcFS to dstFS. It
+// must run on the host of whichever side is a LocalFS, and copies directly
+// between the two. Only a transfer between two remote file systems passes
+// through this host.
+func Transfer(
+	storageId string, xfers []parsing.ObligatoryXfer,
+	srcFS, dstFS AbstractFileSystem,
+) error {
+	_, srcIsLocal := srcFS.(LocalFS)
+	_, dstIsLocal := dstFS.(LocalFS)
+	if !srcIsLocal && !dstIsLocal {
+		return TransferViaIntermediary(storageId, xfers, srcFS, dstFS)
+	}
+
+	for _, xfer := range xfers {
+		var err error
+		if dstIsLocal {
+			err = srcFS.Download(xfer.SrcHostPath, xfer.DstHostPath)
+		} else {
+			err = dstFS.Upload(xfer.SrcHostPath, xfer.DstHostPath)
+		}
+		if err != nil {
+			return fmt.Errorf(
+				"error transferring %s to %s: %s",
+				xfer.SrcHostPath, xfer.DstHostPath, err,
+			)
+		}
+	}
+	return nil
+}
+
 // Revise to take host paths
 func TransferViaIntermediary(
 	storageId string, xfers []parsing.ObligatoryXfer,
@@ -68,14 +99,13 @@ func TransferViaIntermediary(
     }
 	for _, xfer := range xfers {
 		localPath := filepath.Join(localRoot, "transfer", xfer.DstHostPath)
-		// Download file to intermediate FS if it does not exist
-		if _, statErr := os.Stat(localPath); statErr != nil {
-			if downloadErr := srcFS.Download(xfer.SrcHostPath, localPath); downloadErr != nil {
-				return fmt.Errorf(
-					"error downloading %s to local path %s: %s",
-					xfer.SrcHostPath, localPath, downloadErr,
-				)
-			}
+		// Always refresh the intermediate copy: one left by an earlier
+		// transfer may be older or hold only part of a directory.
+		if downloadErr := srcFS.Download(xfer.SrcHostPath, localPath); downloadErr != nil {
+			return fmt.Errorf(
+				"error downloading %s to local path %s: %s",
+				xfer.SrcHostPath, localPath, downloadErr,
+			)
 		}
 
 		if uploadErr := dstFS.Upload(localPath, xfer.DstHostPath); uploadErr != nil {
@@ -122,19 +152,19 @@ func GlobActivity[T AbstractFileSystem](
 }
 
 func TransferLocalToSshFS(storageId string, srcFS LocalFS, dstFS SshFS, xfers []parsing.ObligatoryXfer) error {
-	return TransferViaIntermediary(storageId, xfers, srcFS, dstFS)
+	return Transfer(storageId, xfers, srcFS, dstFS)
 }
 
 func TransferLocalToLocalFS(storageId string, srcFS LocalFS, dstFS LocalFS, xfers []parsing.ObligatoryXfer) error {
-	return TransferViaIntermediary(storageId, xfers, srcFS, dstFS)
+	return Transfer(storageId, xfers, srcFS, dstFS)
 }
 
 func TransferSshToLocalFS(storageId string, srcFS SshFS, dstFS LocalFS, xfers []parsing.ObligatoryXfer) error {
-	return TransferViaIntermediary(storageId, xfers, srcFS, dstFS)
+	return Transfer(storageId, xfers, srcFS, dstFS)
 }
 
-func TransferSshToSshFS(storageId string, srcFS, dstFS LocalFS, xfers []parsing.ObligatoryXfer) error {
-	return TransferViaIntermediary(storageId, xfers, srcFS, dstFS)
+func TransferSshToSshFS(storageId string, srcFS, dstFS SshFS, xfers []parsing.ObligatoryXfer) error {
+	return Transfer(storageId, xfers, srcFS, dstFS)
 }
 
 // It's extremely regrettable that we need to do this, but temporal activities need to know concrete types.

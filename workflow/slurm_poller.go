@@ -1131,6 +1131,33 @@ func (connMan *SlurmActivity) mkdirAll(dirs []string) error {
 	return nil
 }
 
+// heartbeatWhile records an activity heartbeat at once and then every interval
+// until the returned function is called or ctx is done. The returned function
+// waits for the last heartbeat to be recorded.
+func heartbeatWhile(ctx context.Context, interval time.Duration, details ...interface{}) func() {
+	stop := make(chan struct{})
+	stopped := make(chan struct{})
+	go func() {
+		defer close(stopped)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			activity.RecordHeartbeat(ctx, details...)
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return func() {
+		close(stop)
+		<-stopped
+	}
+}
+
 func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 	ctx context.Context,
 	cmd parsing.CmdRunParams, jobConfig parsing.SlurmJobConfig,
@@ -1147,6 +1174,13 @@ func (connMan *SlurmActivity) StartRemoteSlurmJobActivity(
 		return SlurmJob{}, err
 	}
 	tmpOutputHostPath := filepath.Join(slurmDir, jobSlurmId)
+
+	// The activity is given a heartbeat timeout so that a lost worker is
+	// noticed quickly. Its SSH and rsync calls take longer than that timeout
+	// on a site whose transfer endpoint is a separate host, so it reports
+	// that it is alive while they run.
+	stopHeartbeat := heartbeatWhile(ctx, time.Second, correlationKey)
+	defer stopHeartbeat()
 
 	// Create all required remote directories in a single SSH call.
 	dirsToCreate := []string{tmpOutputHostPath}
