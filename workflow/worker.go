@@ -56,6 +56,16 @@ func StartWorkers(
 	return nil
 }
 
+// StartCommandWorker serves only the command queue on a separate host, without
+// polling scheduler activities or establishing any Slurm SSH connection.
+func StartCommandWorker(c client.Client, queueName string, cancelChan chan any) error {
+	if err := checkDeps(); err != nil {
+		return err
+	}
+	go StartWorker(c, queueName, false, cancelChan)
+	return nil
+}
+
 func StartWorker(
 	c client.Client, queueName string, scheduler bool,
 	cancelChan chan any,
@@ -70,6 +80,7 @@ func StartWorker(
 		w.RegisterActivity(BuildSingularitySIF)
 		w.RegisterActivity(PersistDurableWorkflowRecordActivity)
 		w.RegisterActivity(fs.GlobActivity[fs.LocalFS])
+		w.RegisterActivity(CheckSharedFilesystemProbe)
 	} else {
 		registerCmdWorkerActivities(w)
 	}
@@ -86,13 +97,14 @@ type activityRegistry interface {
 }
 
 // registerCmdWorkerActivities registers what a worker that runs commands on its
-// own host must serve. That includes the transfers: an input produced on
-// another executor is fetched by the worker that will read it, so that it
-// lands on that worker's file system.
+// own host must serve. Transfers normally run here; shared-filesystem workers
+// can instead use the scheduler host's Slurm queue for cluster transfers.
 func registerCmdWorkerActivities(r activityRegistry) {
 	r.RegisterActivity(WorkerHeartbeatActivity)
 	r.RegisterActivity(RunCmdActivity)
 	r.RegisterActivity(fs.SetupRootDir)
+	r.RegisterActivity(WriteSharedFilesystemProbe)
+	r.RegisterActivity(CheckWorkerImage)
 	registerXferActivities(r)
 }
 
@@ -134,6 +146,7 @@ func StartSlurmWorker(
 	w.RegisterActivity(slurmActivityObj.StartRemoteSlurmJobActivity)
 	w.RegisterActivity(fs.SshDownloadActivity)
 	w.RegisterActivity(fs.SshUploadActivity)
+	w.RegisterActivity(CheckSharedFilesystemProbe)
 	registerXferActivities(w)
 	log.Println("Starting worker...")
 	err = w.Run(cancelChan)

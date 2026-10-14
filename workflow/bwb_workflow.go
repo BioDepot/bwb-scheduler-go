@@ -637,6 +637,10 @@ func setupExecutors(
 			ctx, &selector, cmdMan, masterFS, workers, storageId,
 			jobConfig.TemporalConfigsByNode,
 		)
+		temporalExecutor.sharedFilesystemWithScheduler = jobConfig.TemporalExecutor.SharedFilesystemWithScheduler
+		if temporalExecutor.sharedFilesystemWithScheduler && len(jobConfig.SlurmConfigsByNode) > 0 {
+			temporalExecutor.sharedSlurmQueue = GetTemporalSshQueueName(jobConfig.SlurmExecutor)
+		}
 		executorList = append(executorList, &temporalExecutor)
 		for nodeId := range jobConfig.TemporalConfigsByNode {
 			executors[nodeId] = &temporalExecutor

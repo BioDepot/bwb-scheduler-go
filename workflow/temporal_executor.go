@@ -17,24 +17,26 @@ type RunningCmdActivity struct {
 }
 
 type TemporalExecutor struct {
-	ctx                    workflow.Context
-	canceled               bool
-	handleFinishedCmd      CmdHandler
-	handleFileXfers        FileXferHandler
-	masterFS               fs.LocalFS
-	workers                map[string]WorkerInfo
-	storageId              string
-	selector               *workflow.Selector
-	schedulerWE            workflow.Execution
-	runningCmdActivities   []RunningCmdActivity
-	cancelIdxs             map[int]struct{}
-	cancelChild            func()
-	workerFSs              map[string]fs.LocalFS
-	cmdsById               map[int]parsing.CmdRunParams
-	grantsById             map[int]ResourceGrant
-	configsByNode          map[int]parsing.LocalJobConfig
-	waitForCmdCancellation bool
-	errors                 []error
+	ctx                           workflow.Context
+	canceled                      bool
+	handleFinishedCmd             CmdHandler
+	handleFileXfers               FileXferHandler
+	masterFS                      fs.LocalFS
+	workers                       map[string]WorkerInfo
+	storageId                     string
+	selector                      *workflow.Selector
+	schedulerWE                   workflow.Execution
+	runningCmdActivities          []RunningCmdActivity
+	cancelIdxs                    map[int]struct{}
+	cancelChild                   func()
+	workerFSs                     map[string]fs.LocalFS
+	cmdsById                      map[int]parsing.CmdRunParams
+	grantsById                    map[int]ResourceGrant
+	configsByNode                 map[int]parsing.LocalJobConfig
+	waitForCmdCancellation        bool
+	errors                        []error
+	sharedFilesystemWithScheduler bool
+	sharedSlurmQueue              string
 }
 
 func NewTemporalExecutor(
@@ -143,6 +145,20 @@ func (exec *TemporalExecutor) Setup(v1 bool) error {
 		}
 
 		exec.workerFSs[queueId] = fs.LocalFS{RootDir: rootDir}
+		if exec.sharedFilesystemWithScheduler {
+			var probe SharedFilesystemProbe
+			if err := workflow.ExecuteActivity(cmdCtx, WriteSharedFilesystemProbe, rootDir).Get(exec.ctx, &probe); err != nil {
+				return fmt.Errorf("shared filesystem probe on worker %s: %w", queueId, err)
+			}
+			ao.TaskQueue = SCHEDULER_QUEUE
+			if exec.sharedSlurmQueue != "" {
+				ao.TaskQueue = exec.sharedSlurmQueue
+			}
+			checkCtx := workflow.WithActivityOptions(exec.ctx, ao)
+			if err := workflow.ExecuteActivity(checkCtx, CheckSharedFilesystemProbe, probe).Get(exec.ctx, nil); err != nil {
+				return fmt.Errorf("shared filesystem check for worker %s: %w", queueId, err)
+			}
+		}
 	}
 	return nil
 }
@@ -208,11 +224,28 @@ func (exec *TemporalExecutor) BuildImages(imageNames []string) error {
 	}
 	cmdCtx := workflow.WithActivityOptions(exec.ctx, ao)
 	for _, imageName := range imageNames {
+		var imagePath string
 		err := workflow.ExecuteActivity(
 			cmdCtx, BuildSingularitySIF, imageName,
-		).Get(exec.ctx, nil)
+		).Get(exec.ctx, &imagePath)
 		if err != nil {
 			return err
+		}
+		if exec.sharedFilesystemWithScheduler {
+			needsSIF := false
+			for _, config := range exec.configsByNode {
+				needsSIF = needsSIF || !config.UseDocker
+			}
+			if needsSIF {
+				for queueId := range exec.workers {
+					workerAO := ao
+					workerAO.TaskQueue = queueId
+					workerCtx := workflow.WithActivityOptions(exec.ctx, workerAO)
+					if err := workflow.ExecuteActivity(workerCtx, CheckWorkerImage, imageName, imagePath).Get(exec.ctx, nil); err != nil {
+						return fmt.Errorf("image check for worker %s: %w", queueId, err)
+					}
+				}
+			}
 		}
 	}
 	return nil
@@ -234,12 +267,36 @@ func (exec *TemporalExecutor) RunXfersAndCmdWithGrant(
 			MaximumAttempts: 1,
 		},
 	}
-	downloadCtx := workflow.WithActivityOptions(exec.ctx, downloadAo)
 	logger.Info("Performing xfers", "infiles", cmd.Xfers)
-	downloadFutures, err := exec.handleFileXfers(downloadCtx, exec.storageId, cmd.Xfers)
-	if err != nil {
-		exec.errors = append(exec.errors, err)
-		return
+	// Preserve the original batching and queue unless shared staging is enabled.
+	workerXfers := cmd.Xfers
+	var sharedXfers []parsing.ObligatoryXfer
+	if exec.sharedSlurmQueue != "" {
+		workerXfers = nil
+		for _, xfer := range cmd.Xfers {
+			if xfer.SrcExecutor == parsing.EXEC_SLURM && xfer.DstExecutor == parsing.EXEC_TEMPORAL {
+				sharedXfers = append(sharedXfers, xfer)
+			} else {
+				workerXfers = append(workerXfers, xfer)
+			}
+		}
+	}
+	var downloadFutures []workflow.Future
+	for _, batch := range []struct {
+		queue string
+		xfers []parsing.ObligatoryXfer
+	}{{grant.WorkerId, workerXfers}, {exec.sharedSlurmQueue, sharedXfers}} {
+		if len(batch.xfers) == 0 {
+			continue
+		}
+		downloadAo.TaskQueue = batch.queue
+		downloadCtx := workflow.WithActivityOptions(exec.ctx, downloadAo)
+		futures, err := exec.handleFileXfers(downloadCtx, exec.storageId, batch.xfers)
+		if err != nil {
+			exec.errors = append(exec.errors, err)
+			return
+		}
+		downloadFutures = append(downloadFutures, futures...)
 	}
 
 	remaining := len(downloadFutures)

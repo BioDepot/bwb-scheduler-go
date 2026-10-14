@@ -1,8 +1,38 @@
 package parsing
 
 import (
+	"fmt"
 	"testing"
 )
+
+func TestTemporalSharedFilesystemConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name, config  string
+		want, invalid bool
+	}{
+		{"omitted", `{}`, false, false},
+		{"enabled", `{"shared_filesystem_with_scheduler":true}`, true, false},
+		{"disabled", `{"shared_filesystem_with_scheduler":false}`, false, false},
+		{"string", `{"shared_filesystem_with_scheduler":"true"}`, false, true},
+		{"number", `{"shared_filesystem_with_scheduler":1}`, false, true},
+		{"null_field", `{"shared_filesystem_with_scheduler":null}`, false, true},
+		{"array_field", `{"shared_filesystem_with_scheduler":[]}`, false, true},
+		{"unknown", `{"shared_filesystem_with_schedular":true}`, false, true},
+		{"null_executor", `null`, false, true},
+		{"array_executor", `[]`, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`{"executors":{"temporal":%s},"configs":{},"node_configs":{}}`, tc.config))
+			config, err := ParseAndValidateJobConfig(data)
+			if (err != nil) != tc.invalid {
+				t.Fatalf("invalid=%v, error=%v", tc.invalid, err)
+			}
+			if err == nil && config.TemporalExecutor.SharedFilesystemWithScheduler != tc.want {
+				t.Fatalf("setting not retained: %#v", config.TemporalExecutor)
+			}
+		})
+	}
+}
 
 func TestExecutorsValidation(t *testing.T) {
 	valid := []byte(`{
