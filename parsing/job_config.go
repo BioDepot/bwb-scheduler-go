@@ -65,6 +65,11 @@ type LocalJobConfig struct {
 	UseDocker bool
 }
 
+type TemporalExecutorConfig struct {
+	// Worker staging paths must be visible at the same path on the scheduler host.
+	SharedFilesystemWithScheduler bool `json:"shared_filesystem_with_scheduler,omitempty"`
+}
+
 type ExecutionIdentity struct {
 	RequestID      string `json:"request_id"`
 	WorkflowID     string `json:"workflow_id"`
@@ -86,18 +91,16 @@ type RawJobConfig struct {
 }
 
 type JobConfig struct {
-	ExecutionIdentity  ExecutionIdentity
-	EvidenceDir        string
-	ExecTypeByNode     map[int]ExecType
-	SlurmExecutor      SshConfig
-	SlurmConfigsByNode map[int]SlurmJobConfig
-	SlurmConfigsByName map[string]SlurmJobConfig
-	// Currently, these executors take no user arguments, but
-	// we mark them anyway in case we ever want to add any.
+	ExecutionIdentity     ExecutionIdentity
+	EvidenceDir           string
+	ExecTypeByNode        map[int]ExecType
+	SlurmExecutor         SshConfig
+	SlurmConfigsByNode    map[int]SlurmJobConfig
+	SlurmConfigsByName    map[string]SlurmJobConfig
 	LocalExecutor         struct{}
 	LocalConfigsByNode    map[int]LocalJobConfig
 	LocalConfigsByName    map[string]LocalJobConfig
-	TemporalExecutor      struct{}
+	TemporalExecutor      TemporalExecutorConfig
 	TemporalConfigsByNode map[int]LocalJobConfig
 	TemporalConfigsByName map[string]LocalJobConfig
 }
@@ -188,6 +191,7 @@ func (jd *RawJobConfig) Validate(jc *JobConfig) error {
 
 func (jd *RawJobConfig) validateExecutors(jc *JobConfig) error {
 	var errorMessages []string
+	jc.TemporalExecutor = TemporalExecutorConfig{}
 
 	validExecutors := map[string]bool{"local": true, "slurm": true, "temporal": true}
 
@@ -207,7 +211,25 @@ func (jd *RawJobConfig) validateExecutors(jc *JobConfig) error {
 					errorMessages = append(errorMessages, err.Error())
 				}
 			}
-		case "local", "temporal":
+		case "temporal":
+			configMap, ok := executorConfig.(map[string]any)
+			if !ok {
+				errorMessages = append(errorMessages, "executor 'temporal' must be a dictionary")
+				continue
+			}
+			for field, value := range configMap {
+				if field != "shared_filesystem_with_scheduler" {
+					errorMessages = append(errorMessages, fmt.Sprintf("unknown temporal executor field %q", field))
+					continue
+				}
+				shared, ok := value.(bool)
+				if !ok {
+					errorMessages = append(errorMessages, "temporal.shared_filesystem_with_scheduler must be a boolean")
+					continue
+				}
+				jc.TemporalExecutor.SharedFilesystemWithScheduler = shared
+			}
+		case "local":
 			{
 				configMap, ok := executorConfig.(map[string]any)
 				if !ok || (ok && len(configMap) > 0) {

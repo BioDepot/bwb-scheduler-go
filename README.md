@@ -252,6 +252,28 @@ variables. Unknown fields and unsafe values are rejected.
 
 ### Pre-merge acceptance
 
+For a command worker whose staging directory is shared with the scheduler host,
+set `"temporal": {"shared_filesystem_with_scheduler": true}` under `executors`.
+Both hosts must see the worker's absolute staging path at the same path. Setup
+writes a fresh marker on the worker and checks it on the scheduler host before
+running commands. Transfers between this worker and Slurm run on the scheduler
+host's Slurm task queue in both directions; the command still runs on its worker
+queue. The command worker needs no Slurm SSH credentials. Omitting the field or
+setting it to `false` preserves the original transfer routing.
+
+On the separate command host, run `bwbScheduler workers --command-only
+--workerName QUEUE --cpus N --ram SIZE` with the shared `BWB_SCHED_DIR` and the
+scheduler's Temporal address/namespace. This mode polls only the command queue;
+it needs no site config or Slurm credentials. Run the usual workers with the
+full site config on the scheduler host. In a hybrid workflow the marker is
+checked on that host's Slurm queue.
+
+SIF images are built on the scheduler host under `BWB_SCHED_DIR/images`.
+In shared-filesystem mode, every Singularity worker checks during setup that its
+own `BWB_SCHED_DIR/images` resolves to those built files (the same shared path,
+or a symlink to it). A missing or different image fails setup with the expected
+path and worker hostname. Docker workers use their own Docker image store.
+
 `scripts/acceptance/run_premerge_acceptance.sh` builds with Go 1.24.4 and runs
 one of the `smoke`, `submission-loss`, `cleanup-failure`, `continue-as-new`, or
 `continue-as-new-cancel` scenarios. It writes redacted requests, API responses, Temporal history, Slurm

@@ -28,6 +28,7 @@ func TestCmdWorkerServesTransfers(t *testing.T) {
 	}
 	for _, want := range []string{
 		"WorkerHeartbeatActivity", "RunCmdActivity", "SetupRootDir",
+		"WriteSharedFilesystemProbe", "CheckWorkerImage",
 		"TransferSshToLocalFS", "TransferLocalToLocalFS",
 		"TransferLocalToSshFS", "TransferSshToSshFS",
 	} {

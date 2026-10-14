@@ -637,12 +637,12 @@ func main() {
 	var workersGpus int
 	var workersQueueName string
 	var workersVerbose bool
+	var workersCommandOnly bool
 
 	workersCmd := &cobra.Command{
-		Use: "workers",
-		Short: "Start Temporal workers (always starts scheduler queue worker; " +
-			"starts additional workers based on config)",
-		Args: cobra.NoArgs,
+		Use:   "workers",
+		Short: "Start Temporal workers (scheduler and configured workers, or only a command worker)",
+		Args:  cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
 			if !cmd.Flags().Changed("ram") {
 				vmStat, err := mem.VirtualMemory()
@@ -719,7 +719,12 @@ func main() {
 			}
 
 			cancelChan := make(chan any)
-			if err := workflow.StartWorkers(c, jobConfig, queueName, cancelChan, true); err != nil {
+			if workersCommandOnly {
+				err = workflow.StartCommandWorker(c, queueName, cancelChan)
+			} else {
+				err = workflow.StartWorkers(c, jobConfig, queueName, cancelChan, true)
+			}
+			if err != nil {
 				return fmt.Errorf("error starting workers: %s", err)
 			}
 
@@ -742,6 +747,8 @@ func main() {
 			"workers are started. Needed for SLURM. E.g. use test_workflows/salmon_v1_config.json "+
 			"for worker if you intend to set up necessary workers for that configuration of the WF.",
 	)
+	workersCmd.Flags().BoolVar(&workersCommandOnly, "command-only", false,
+		"Serve only the local command queue, without scheduler or SLURM workers (no --config needed)")
 	workersCmd.Flags().StringVar(
 		&workersQueueName, "workerName", "",
 		"Temporal queue name for the local worker. Defaults to a random string.",
