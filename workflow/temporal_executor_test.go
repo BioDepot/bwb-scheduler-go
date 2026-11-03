@@ -70,6 +70,7 @@ func TestTemporalExecutorGrantRequest(t *testing.T) {
         }).Once()
 
     env.ExecuteWorkflow(func(ctx workflow.Context) error {
+pinLegacyScheduler(ctx)
         selector := workflow.NewSelector(ctx)
         temporalExec := NewTemporalExecutor(
             ctx, &selector, nil, fs.LocalFS{}, map[string]WorkerInfo{
@@ -182,6 +183,7 @@ func TestTemporalExecutorFileDownloads(t *testing.T) {
         }).Once()
 
     env.ExecuteWorkflow(func(ctx workflow.Context) error {
+pinLegacyScheduler(ctx)
         selector := workflow.NewSelector(ctx)
         temporalExec := NewTemporalExecutor(
             ctx, &selector, nil, localFS, map[string]WorkerInfo{

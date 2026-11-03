@@ -241,6 +241,18 @@ See `serverIntegrationTest.py` for a full example of setting up workers, startin
 - When `BWB_API_BEARER_TOKEN` is configured, send `Authorization: Bearer <token>` on every request.
 - Administrative reconciliation requires `BWB_ADMIN_BEARER_TOKEN`, defaults to dry-run, and is available only for `CANCEL_CLEANUP_FAILED` workflows.
 
+### Resources shared between workflows (worker ledger)
+
+Several workflows can run in one Temporal namespace, at the same time or one after another. Workflows that run commands on a Temporal worker queue (the `temporal` executor, including `run` and `/start_workflow` with `worker_info.queue_id`) share one account of that worker:
+
+- One `WorkerLedgerWorkflow` runs per (namespace, worker queue), with the ID `worker-ledger-<queue>-<hash>`. It is started on demand by the first workflow that names the queue (an activity calls SignalWithStart, so starting and attaching cannot race) and it ends after 60 seconds with no workflows, grants or requests. It is served by any process that polls the `bwb_worker` queue (`run`, `workers` without `--command-only`); it is durable, so if the process serving it exits, another process picks it up, and if none is polling it waits until one does.
+- Each workflow registers its queue and declared capacity, requests and releases grants through the ledger, and deregisters when it finishes. Two workflows on the same queue are therefore never granted, together, more CPUs, memory or GPUs than the worker declared. Workflows on different queues are independent and run in parallel.
+- Capacity rule: the first workflow to register while the ledger has no workflows sets the queue's capacity. A workflow that declares a different CPU, memory or GPU capacity for a queue that other workflows are using fails at start with an error naming both capacities. Use the same `--cpus`, `--ram` and `--gpus` (or `worker_info`) for every workflow on a queue.
+- Ordering: the ledger applies the same policy as before to all workflows together: rank first, then GPUs, CPUs and memory, largest first, and equal requests in arrival order. A request that does not fit is skipped and smaller ones that fit are granted, so a large request can wait while smaller ones from any workflow keep arriving.
+- Reclaiming: a workflow's grants and queued requests are freed when it deregisters (completed, failed or cancelled), and every 30 seconds the ledger checks whether each registered workflow is still running and frees those of workflows that have been terminated or timed out. A client killed with `kill -9` leaves its workflow open until its running command activity misses its heartbeat (about a minute); the workflow then fails and its grants are freed.
+- A workflow that names more than one worker queue in its input keeps the earlier per-workflow scheduler and does not share an account. Workflows started before this feature keep it too.
+- Limits: the ledger trusts each workflow to run only what it was granted; nothing outside the scheduler (other programs, other namespaces, a worker queue used from two namespaces) is counted. `LocalResourceScheduler` (workflows run without Temporal) is per process.
+
 ### Slurm site profiles
 
 The Slurm executor accepts separate command and transfer ports, a known-hosts

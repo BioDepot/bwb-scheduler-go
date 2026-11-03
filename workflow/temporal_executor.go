@@ -39,6 +39,10 @@ type TemporalExecutor struct {
 	errors                        []error
 	sharedFilesystemWithScheduler bool
 	sharedSlurmQueue              string
+	// useLedger: resources are granted by the queue's shared ledger instead of
+	// a per-workflow scheduler child.
+	useLedger bool
+	ledgerID  string
 }
 
 func NewTemporalExecutor(
@@ -118,24 +122,99 @@ func (exec *TemporalExecutor) schedulerWorkflowID() string {
 	return resourceSchedulerWorkflowID(info.ID, info.RunID)
 }
 
+// setupLedger registers this workflow with the shared ledger of its worker
+// queue and waits for the ledger's answer.
+func (exec *TemporalExecutor) setupLedger() error {
+	var queue string
+	var info WorkerInfo
+	for q, w := range exec.workers {
+		queue, info = q, w
+	}
+	exec.ledgerID = workerLedgerWorkflowID(queue)
+	self := workflow.GetInfo(exec.ctx).WorkflowExecution
+	reg := LedgerRegistration{
+		Queue: queue, Capacity: info.TotalResources,
+		Holder: LedgerHolder{WorkflowId: self.ID, RunId: self.RunID},
+	}
+	ackCh := workflow.GetSignalChannel(exec.ctx, ledgerRegisteredSignal)
+	ao := workflow.ActivityOptions{
+		TaskQueue:           SCHEDULER_QUEUE,
+		StartToCloseTimeout: 30 * time.Second,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 5},
+	}
+	if err := workflow.ExecuteActivity(
+		workflow.WithActivityOptions(exec.ctx, ao), "EnsureWorkerLedger", reg,
+	).Get(exec.ctx, nil); err != nil {
+		return fmt.Errorf("could not register with the ledger of worker queue %s: %w", queue, err)
+	}
+
+	timerCtx, cancelTimer := workflow.WithCancel(exec.ctx)
+	defer cancelTimer()
+	var ack LedgerAck
+	got, timedOut := false, false
+	sel := workflow.NewSelector(exec.ctx)
+	sel.AddReceive(ackCh, func(c workflow.ReceiveChannel, _ bool) {
+		c.Receive(exec.ctx, &ack)
+		got = true
+	})
+	sel.AddFuture(workflow.NewTimer(timerCtx, ledgerAckTimeout), func(workflow.Future) { timedOut = true })
+	for !got && !timedOut {
+		sel.Select(exec.ctx)
+	}
+	if timedOut {
+		exec.deregisterFromLedger()
+		return fmt.Errorf("no answer from the ledger of worker queue %s within %s; "+
+			"is a scheduler worker polling the %s queue?", queue, ledgerAckTimeout, SCHEDULER_QUEUE)
+	}
+	if ack.Error != "" {
+		return errors.New(ack.Error)
+	}
+	exec.cancelChild = func() {}
+	return nil
+}
+
+func (exec *TemporalExecutor) deregisterFromLedger() {
+	if !exec.useLedger || exec.ledgerID == "" {
+		return
+	}
+	self := workflow.GetInfo(exec.ctx).WorkflowExecution
+	ctx, cancel := workflow.NewDisconnectedContext(exec.ctx)
+	defer cancel()
+	// Best effort: the ledger also reclaims by liveness check.
+	_ = workflow.SignalExternalWorkflow(
+		ctx, exec.ledgerID, "", ledgerDeregisterSignal,
+		LedgerDeregistration{Holder: LedgerHolder{WorkflowId: self.ID, RunId: self.RunID}},
+	).Get(ctx, nil)
+}
+
 func (exec *TemporalExecutor) Setup(v1 bool) error {
-	childCtx, cancelChild := workflow.WithCancel(exec.ctx)
-	schedChildWfOptions := workflow.ChildWorkflowOptions{
-		WorkflowID: exec.schedulerWorkflowID(),
-		TaskQueue:  SCHEDULER_QUEUE,
+	// Versions: default = per-workflow scheduler child (fb76cb5, 04b91ca);
+	// 1 = shared per-queue ledger, for workflows that name exactly one queue.
+	ledgerVersion := workflow.GetVersion(exec.ctx, "shared-worker-ledger", workflow.DefaultVersion, 1)
+	exec.useLedger = ledgerVersion != workflow.DefaultVersion && len(exec.workers) == 1
+	if exec.useLedger {
+		if err := exec.setupLedger(); err != nil {
+			return err
+		}
+	} else {
+		childCtx, cancelChild := workflow.WithCancel(exec.ctx)
+		schedChildWfOptions := workflow.ChildWorkflowOptions{
+			WorkflowID: exec.schedulerWorkflowID(),
+			TaskQueue:  SCHEDULER_QUEUE,
+		}
+		childCtx = workflow.WithChildOptions(childCtx, schedChildWfOptions)
+		schedChildWfFuture := workflow.ExecuteChildWorkflow(
+			childCtx, ResourceSchedulerWorkflow, SchedWorkflowState{
+				Workers: exec.workers,
+			},
+		)
+		err := schedChildWfFuture.GetChildWorkflowExecution().Get(exec.ctx, &exec.schedulerWE)
+		if err != nil {
+			outErr := fmt.Errorf("failed getting child WF execution: %s", err)
+			return outErr
+		}
+		exec.cancelChild = cancelChild
 	}
-	childCtx = workflow.WithChildOptions(childCtx, schedChildWfOptions)
-	schedChildWfFuture := workflow.ExecuteChildWorkflow(
-		childCtx, ResourceSchedulerWorkflow, SchedWorkflowState{
-			Workers: exec.workers,
-		},
-	)
-	err := schedChildWfFuture.GetChildWorkflowExecution().Get(exec.ctx, &exec.schedulerWE)
-	if err != nil {
-		outErr := fmt.Errorf("failed getting child WF execution: %s", err)
-		return outErr
-	}
-	exec.cancelChild = cancelChild
 
 	rGrantChan := workflow.GetSignalChannel(exec.ctx, "allocation-response")
 	(*exec.selector).AddReceive(rGrantChan, func(c workflow.ReceiveChannel, _ bool) {
@@ -209,6 +288,7 @@ func (exec *TemporalExecutor) Shutdown() error {
 	for cancelIdx := range exec.cancelIdxs {
 		exec.runningCmdActivities[cancelIdx].future.Get(exec.ctx, nil)
 	}
+	exec.deregisterFromLedger()
 	return nil
 }
 
@@ -229,6 +309,13 @@ func (exec *TemporalExecutor) RunCmds(
 			CallerWorkflowId: workflowId,
 		}
 
+		if exec.useLedger {
+			req.CallerRunId = workflow.GetInfo(exec.ctx).WorkflowExecution.RunID
+			workflow.SignalExternalWorkflow(
+				exec.ctx, exec.ledgerID, "", ledgerRequestSignal, req,
+			)
+			continue
+		}
 		workflow.SignalExternalWorkflow(
 			exec.ctx, exec.schedulerWE.ID, "",
 			"new-request", req,
@@ -239,6 +326,12 @@ func (exec *TemporalExecutor) RunCmds(
 func (exec *TemporalExecutor) ReleaseResourceGrant(
 	grant ResourceGrant,
 ) error {
+	if exec.useLedger {
+		workflow.SignalExternalWorkflow(
+			exec.ctx, exec.ledgerID, "", ledgerReleaseSignal, grant,
+		)
+		return nil
+	}
 	workflow.SignalExternalWorkflow(
 		exec.ctx, exec.schedulerWE.ID, "",
 		"release-allocation", grant,
