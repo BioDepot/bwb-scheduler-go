@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/worker"
@@ -70,7 +71,7 @@ func StartWorker(
 	c client.Client, queueName string, scheduler bool,
 	cancelChan chan any,
 ) {
-	w := worker.New(c, queueName, worker.Options{})
+	w := worker.New(c, queueName, commandWorkerOptions(scheduler))
 
 	if scheduler {
 		w.RegisterWorkflow(RunBwbWorkflowV0)
@@ -304,4 +305,23 @@ func getHostKeyCallback(conf parsing.SshConfig) (ssh.HostKeyCallback, error) {
 		}
 		return nil
 	}, nil
+}
+
+// CmdHeartbeatThrottle is the longest interval between the heartbeats that a
+// command activity sends to the server. The server delivers a cancellation in
+// the reply to a heartbeat, so a cancellation reaches the worker within about
+// this long. The SDK's own limit is 0.8 x the heartbeat timeout (48 s for the
+// 1 minute timeout of command activities), capped by this option. It does not
+// change the heartbeat timeout, so how long a stall a command tolerates is
+// unchanged. Cost: one heartbeat request per running command every 2 s.
+const CmdHeartbeatThrottle = 2 * time.Second
+
+func commandWorkerOptions(scheduler bool) worker.Options {
+	if scheduler {
+		return worker.Options{}
+	}
+	return worker.Options{
+		MaxHeartbeatThrottleInterval:     CmdHeartbeatThrottle,
+		DefaultHeartbeatThrottleInterval: CmdHeartbeatThrottle,
+	}
 }

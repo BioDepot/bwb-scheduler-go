@@ -19,23 +19,27 @@ type RunningCmdActivity struct {
 }
 
 type TemporalExecutor struct {
-	ctx                           workflow.Context
-	canceled                      bool
-	handleFinishedCmd             CmdHandler
-	handleFileXfers               FileXferHandler
-	masterFS                      fs.LocalFS
-	workers                       map[string]WorkerInfo
-	storageId                     string
-	selector                      *workflow.Selector
-	schedulerWE                   workflow.Execution
-	runningCmdActivities          []RunningCmdActivity
-	cancelIdxs                    map[int]struct{}
-	cancelChild                   func()
-	workerFSs                     map[string]fs.LocalFS
-	cmdsById                      map[int]parsing.CmdRunParams
-	grantsById                    map[int]ResourceGrant
-	configsByNode                 map[int]parsing.LocalJobConfig
-	waitForCmdCancellation        bool
+	ctx                    workflow.Context
+	canceled               bool
+	handleFinishedCmd      CmdHandler
+	handleFileXfers        FileXferHandler
+	masterFS               fs.LocalFS
+	workers                map[string]WorkerInfo
+	storageId              string
+	selector               *workflow.Selector
+	schedulerWE            workflow.Execution
+	runningCmdActivities   []RunningCmdActivity
+	cancelIdxs             map[int]struct{}
+	cancelChild            func()
+	workerFSs              map[string]fs.LocalFS
+	cmdsById               map[int]parsing.CmdRunParams
+	grantsById             map[int]ResourceGrant
+	configsByNode          map[int]parsing.LocalJobConfig
+	waitForCmdCancellation bool
+	// promptStop: the workflow waits for command activities to confirm that
+	// the command has stopped. (How fast a cancellation reaches the worker is
+	// worker configuration, see commandWorkerOptions.)
+	promptStop                    bool
 	errors                        []error
 	sharedFilesystemWithScheduler bool
 	sharedSlurmQueue              string
@@ -188,6 +192,12 @@ func (exec *TemporalExecutor) deregisterFromLedger() {
 }
 
 func (exec *TemporalExecutor) Setup(v1 bool) error {
+	// Version 1: stopping waits for commands to stop (see promptStop).
+	stopVersion := workflow.GetVersion(exec.ctx, "stop-kills-commands", workflow.DefaultVersion, 1)
+	if stopVersion != workflow.DefaultVersion {
+		exec.promptStop = true
+		exec.waitForCmdCancellation = true
+	}
 	// Versions: default = per-workflow scheduler child (fb76cb5, 04b91ca);
 	// 1 = shared per-queue ledger, for workflows that name exactly one queue.
 	ledgerVersion := workflow.GetVersion(exec.ctx, "shared-worker-ledger", workflow.DefaultVersion, 1)
@@ -273,6 +283,8 @@ func (exec *TemporalExecutor) Setup(v1 bool) error {
 	}
 	return nil
 }
+
+func (exec *TemporalExecutor) stopWaitsForCommands() bool { return exec.promptStop }
 
 func (exec *TemporalExecutor) SetCmdHandler(handler CmdHandler) {
 	exec.handleFinishedCmd = handler

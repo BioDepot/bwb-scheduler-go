@@ -354,6 +354,31 @@ func setupImageDir() (string, error) {
 	return imageDir, nil
 }
 
+// CmdKillGrace is how long a cancelled command has between SIGTERM and SIGKILL.
+const CmdKillGrace = 5 * time.Second
+
+// stopProcessGroup stops the process group led by cmd: SIGTERM, then SIGKILL
+// after grace if the group has not finished, then a final SIGKILL to any
+// process left in the group. It returns when cmd's Run has returned (done) or
+// after a further bound.
+func stopProcessGroup(cmd *exec.Cmd, done <-chan error, grace time.Duration) {
+	if cmd.Process == nil {
+		return
+	}
+	pgid := cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGTERM)
+	select {
+	case <-done:
+	case <-time.After(grace):
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
 func runCmdDocker(
 	ctx context.Context,
 	volumes map[string]string,
@@ -382,7 +407,7 @@ func runCmdDocker(
 	rmTmpDirCmd := exec.Command("sh", "-c", rmTmpDirCmdStr)
 	defer rmTmpDirCmd.Run()
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	go func() {
 		errChan <- cmd.Run()
 	}()
@@ -390,9 +415,15 @@ func runCmdDocker(
 	select {
 	case <-ctx.Done():
 		{
-			rmCntCmdStr := fmt.Sprintf("docker rm -f %s", cntName)
-			rmCntCmd := exec.Command("sh", "-c", rmCntCmdStr)
+			// SIGTERM to the container, SIGKILL after the grace period, then
+			// remove it and make sure the docker client process is gone.
+			stopCmd := exec.Command("sh", "-c", fmt.Sprintf(
+				"docker stop -t %d %s", int(CmdKillGrace.Seconds()), cntName,
+			))
+			stopCmd.Run()
+			rmCntCmd := exec.Command("sh", "-c", fmt.Sprintf("docker rm -f %s", cntName))
 			rmCntCmd.Run()
+			stopProcessGroup(cmd, errChan, CmdKillGrace)
 			return CmdOutput{}, context.Canceled
 		}
 	case procErr := <-errChan:
@@ -457,8 +488,10 @@ func runCmdSingularity(
 		cmdTemplate, volumes, localSifPath, useGpu,
 	)
 
-	// Configure cmd to get killed automatically if ctx is cancelled.
-	cmd := exec.CommandContext(ctx, "sh", "-c", cmdStr)
+	// The command runs in its own process group so that a cancellation
+	// reaches the whole tree, including the container started by sh.
+	cmd := exec.Command("sh", "-c", cmdStr)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var stdout, stderr bytes.Buffer
 	cmd.Env = envs
 	cmd.Stdout = &stdout
@@ -467,13 +500,15 @@ func runCmdSingularity(
 	cmdWithEnvStr := fmt.Sprintf("%s %s", strings.Join(envs, " "), cmdStr)
 	fmt.Println(cmdWithEnvStr)
 
-	errChan := make(chan error)
+	errChan := make(chan error, 1)
 	go func() {
 		errChan <- cmd.Run()
 	}()
 	select {
 	case <-ctx.Done():
 		{
+			// Returns only once the process tree has stopped.
+			stopProcessGroup(cmd, errChan, CmdKillGrace)
 			return CmdOutput{}, context.Canceled
 		}
 	case procErr := <-errChan:
@@ -905,12 +940,29 @@ func RunBwbWorkflowV1(
 		}
 	}
 	if runErr != nil {
+		// When a stop waits for the commands to confirm cancellation, their
+		// cancellation reaches the helper as an error. The workflow was
+		// cancelled, so it closes as cancelled, as it did before.
+		if ctx.Err() != nil && !cleanupFailed && stopWaitsForCommands(executorList) {
+			return temporal.NewCanceledError(evidence)
+		}
 		return runErr
 	}
 	if ctx.Err() != nil {
 		return temporal.NewCanceledError(evidence)
 	}
 	return nil
+}
+
+// stopWaitsForCommands reports whether any executor waits for its commands to
+// confirm cancellation (see TemporalExecutor.promptStop, set by GetVersion).
+func stopWaitsForCommands(executors []Executor) bool {
+	for _, executor := range executors {
+		if p, ok := executor.(interface{ stopWaitsForCommands() bool }); ok && p.stopWaitsForCommands() {
+			return true
+		}
+	}
+	return false
 }
 
 func RunBwbWorkflowV0(
