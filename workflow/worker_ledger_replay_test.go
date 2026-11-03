@@ -64,3 +64,28 @@ func TestReplayLedgerHistories(t *testing.T) {
 		})
 	}
 }
+
+// Histories of workflows stopped while their command ran: one made by 5bfd0b8
+// (which does not wait for commands), one by the build
+// that waits for commands to confirm cancellation (version marker
+// "stop-kills-commands" = 1). Sanitized: no host, user or scratch paths.
+func TestReplayStoppedWorkflowHistory(t *testing.T) {
+	for file, id := range map[string]string{
+		"testdata/history_stop_cancel_parent.json":     "wf-Ac1b",
+		"testdata/history_5bfd0b8_stopped_parent.json": "wf-Ac5",
+	} {
+		t.Run(file, func(t *testing.T) { replayStopped(t, file, id) })
+	}
+}
+
+func replayStopped(t *testing.T, file, id string) {
+	f, err := os.Open(file)
+	require.NoError(t, err)
+	defer f.Close()
+	history, err := client.HistoryFromJSON(f, client.HistoryJSONOptions{})
+	require.NoError(t, err)
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(RunBwbWorkflowV1)
+	require.NoError(t, replayer.ReplayWorkflowHistoryWithOptions(nil, history,
+		worker.ReplayWorkflowHistoryOptions{OriginalExecution: workflow.Execution{ID: id}}))
+}
