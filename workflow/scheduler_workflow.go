@@ -47,6 +47,9 @@ type SchedWorkflowState struct {
     NumRetries                 map[string]int
     SecondsSinceHeartbeatSched map[string]int
     SecondsUntilHeartbeatRetry map[string]int
+    // BackoffV1 selects the bounded back-off that resets after a success. It
+    // is set from workflow.GetVersion at the start of each run.
+    BackoffV1 bool
 }
 
 const (
@@ -54,6 +57,11 @@ const (
     HEARTBEAT_RETRY_MAX_SECONDS       = 9000
     HEARTBEAT_RETRY_BASE_SECONDS      = 30
     HEARTBEAT_RETRY_BACKOFF_COEFF     = 4
+
+    // Version 1: wait 30 s after the first consecutive failure, doubling each
+    // time up to 300 s; the count restarts after a successful heartbeat.
+    HEARTBEAT_RETRY_V1_BASE_SECONDS = 30
+    HEARTBEAT_RETRY_V1_MAX_SECONDS  = 300
 )
 
 func WorkerHeartbeatActivity(ctx context.Context, workerId string) error {
@@ -65,6 +73,36 @@ func WorkerHeartbeatActivity(ctx context.Context, workerId string) error {
             return ctx.Err()
         }
     }
+}
+
+// markWorkerDead records a failed heartbeat: the worker is not used until the
+// next retry, which waits longer after each consecutive failure.
+func markWorkerDead(state *SchedWorkflowState, queueId string) {
+    workerRecord := state.Workers[queueId]
+    workerRecord.IsAlive = false
+    state.Workers[queueId] = workerRecord
+
+    if _, ok := state.NumRetries[queueId]; !ok {
+        state.NumRetries[queueId] = 1
+    } else {
+        state.NumRetries[queueId] += 1
+    }
+
+    if state.BackoffV1 {
+        state.SecondsUntilHeartbeatRetry[queueId] = heartbeatRetryWaitV1(state.NumRetries[queueId])
+    } else {
+        // Shockingly, go has no built-in integer exponentiation.
+        multiple := int(math.Pow(
+            HEARTBEAT_RETRY_BACKOFF_COEFF,
+            float64(state.NumRetries[queueId]-1),
+        ))
+
+        state.SecondsUntilHeartbeatRetry[queueId] = min(
+            HEARTBEAT_RETRY_BASE_SECONDS*multiple,
+            HEARTBEAT_RETRY_MAX_SECONDS,
+        )
+    }
+    delete(state.SecondsSinceHeartbeatSched, queueId)
 }
 
 func registerHeartbeatActivity(
@@ -92,39 +130,27 @@ func registerHeartbeatActivity(
             logger.Error("Worker heartbeat error", "workerId", queueId, "error", err)
             var timeoutErr *temporal.TimeoutError
             if errors.As(err, &timeoutErr) {
-                workerRecord := state.Workers[queueId]
-                workerRecord.IsAlive = false
-                state.Workers[queueId] = workerRecord
-
-                if _, ok := state.NumRetries[queueId]; !ok {
-                    state.NumRetries[queueId] = 1
-                } else {
-                    state.NumRetries[queueId] += 1
-                }
-
-                // Shockingly, go has no built-in integer exponentiation.
-                multiple := int(math.Pow(
-                    HEARTBEAT_RETRY_BACKOFF_COEFF,
-                    float64(state.NumRetries[queueId]-1),
-                ))
-
-                state.SecondsUntilHeartbeatRetry[queueId] = min(
-                    HEARTBEAT_RETRY_BASE_SECONDS*multiple,
-                    HEARTBEAT_RETRY_MAX_SECONDS,
-                )
-
-                delete(state.SecondsSinceHeartbeatSched, queueId)
+                markWorkerDead(state, queueId)
             }
         }
     })
     return cancelFunc
 }
 
-func retryHeartbeats(
-    ctx workflow.Context, selector workflow.Selector,
-    state *SchedWorkflowState, secondsElapsed int,
-) {
-    logger := workflow.GetLogger(ctx)
+// heartbeatRetryWaitV1 is the wait before the next heartbeat attempt after
+// the n-th consecutive failure: 30, 60, 120, 240, then 300 seconds.
+func heartbeatRetryWaitV1(failures int) int {
+    wait := HEARTBEAT_RETRY_V1_BASE_SECONDS
+    for i := 1; i < failures && wait < HEARTBEAT_RETRY_V1_MAX_SECONDS; i++ {
+        wait *= 2
+    }
+    return min(wait, HEARTBEAT_RETRY_V1_MAX_SECONDS)
+}
+
+// resurrectWorkers marks workers usable again once their retried heartbeat has
+// outlived the schedule-to-start timeout, which means a poller took it. In
+// version 1 that also ends the run of consecutive failures.
+func resurrectWorkers(state *SchedWorkflowState, secondsElapsed int) {
     resurrectedWorkers := make([]string, 0)
     for queueId := range state.SecondsSinceHeartbeatSched {
         state.SecondsSinceHeartbeatSched[queueId] += secondsElapsed
@@ -133,12 +159,23 @@ func retryHeartbeats(
             workerRecord.IsAlive = true
             state.Workers[queueId] = workerRecord
             resurrectedWorkers = append(resurrectedWorkers, queueId)
+            if state.BackoffV1 {
+                delete(state.NumRetries, queueId)
+            }
         }
     }
 
     for _, queueId := range resurrectedWorkers {
         delete(state.SecondsSinceHeartbeatSched, queueId)
     }
+}
+
+func retryHeartbeats(
+    ctx workflow.Context, selector workflow.Selector,
+    state *SchedWorkflowState, secondsElapsed int,
+) {
+    logger := workflow.GetLogger(ctx)
+    resurrectWorkers(state, secondsElapsed)
 
     retriedWorkers := make([]string, 0)
     for queueId := range state.SecondsUntilHeartbeatRetry {
@@ -290,6 +327,7 @@ func LocalResourceScheduler(
 func ResourceSchedulerWorkflow(ctx workflow.Context, state SchedWorkflowState) error {
     logger := workflow.GetLogger(ctx)
     logger.Debug("(Re-) Starting sched workflow", "state", state)
+    state.BackoffV1 = workflow.GetVersion(ctx, "heartbeat-backoff-reset", workflow.DefaultVersion, 1) != workflow.DefaultVersion
     if state.PendingRequests == nil {
         state.PendingRequests = make([]ResourceRequest, 0)
     }

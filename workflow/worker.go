@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
 	"go-scheduler/fs"
@@ -71,7 +72,17 @@ func StartWorker(
 	c client.Client, queueName string, scheduler bool,
 	cancelChan chan any,
 ) {
-	w := worker.New(c, queueName, commandWorkerOptions(scheduler))
+	opts := commandWorkerOptions(scheduler)
+	// worker.Run returns a fatal worker error; a command worker started with
+	// Start below has to collect it itself.
+	fatalCh := make(chan error, 1)
+	opts.OnFatalError = func(err error) {
+		select {
+		case fatalCh <- err:
+		default:
+		}
+	}
+	w := worker.New(c, queueName, opts)
 
 	if scheduler {
 		w.RegisterWorkflow(RunBwbWorkflowV0)
@@ -89,9 +100,26 @@ func StartWorker(
 	}
 
 	log.Println("Starting worker...")
-	err := w.Run(cancelChan)
-	if err != nil {
+	if scheduler || queueName == SCHEDULER_QUEUE {
+		if err := w.Run(cancelChan); err != nil {
+			log.Fatalln("Unable to start worker", err)
+		}
+		return
+	}
+	// A command worker tells the queue's ledger, if there is one, that it is
+	// polling, so the ledger does not wait for its heartbeat retry timer.
+	if err := w.Start(); err != nil {
 		log.Fatalln("Unable to start worker", err)
+	}
+	signalCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// No ledger running is the normal case and is not an error.
+	_ = c.SignalWorkflow(signalCtx, workerLedgerWorkflowID(queueName), "", ledgerWorkerUpSignal, queueName)
+	cancel()
+	select {
+	case <-cancelChan:
+		w.Stop()
+	case err := <-fatalCh:
+		log.Fatalln("Worker stopped after a fatal error", err)
 	}
 }
 
