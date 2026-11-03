@@ -19,6 +19,8 @@ type ResourceRequest struct {
     Rank             int
     Requirements     parsing.ResourceVector
     CallerWorkflowId string
+    // CallerRunId is set for requests sent to a worker ledger.
+    CallerRunId      string
 }
 
 type ResourceGrant struct {
@@ -27,6 +29,8 @@ type ResourceGrant struct {
     Requirements            parsing.ResourceVector
     Success                 bool
     RecipientWorkflowId     string
+    // RecipientRunId is set for grants issued by a worker ledger.
+    RecipientRunId          string
 }
 
 type WorkerInfo struct {
@@ -155,20 +159,24 @@ func retryHeartbeats(
     }
 }
 
+// requestLess is the scheduling order: rank, then GPUs, CPUs and memory, each
+// largest first.
+func requestLess(reqI, reqJ ResourceRequest) bool {
+    if reqI.Rank != reqJ.Rank {
+        return reqI.Rank > reqJ.Rank
+    }
+    if reqI.Requirements.Gpus != reqJ.Requirements.Gpus {
+        return reqI.Requirements.Gpus > reqJ.Requirements.Gpus
+    }
+    if reqI.Requirements.Cpus != reqJ.Requirements.Cpus {
+        return reqI.Requirements.Cpus > reqJ.Requirements.Cpus
+    }
+    return reqI.Requirements.MemMb > reqJ.Requirements.MemMb
+}
+
 func processRequests(state *SchedWorkflowState) []ResourceGrant {
     sort.Slice(state.PendingRequests, func(i, j int) bool {
-        reqI := state.PendingRequests[i]
-        reqJ := state.PendingRequests[j]
-        if reqI.Rank != reqJ.Rank {
-            return reqI.Rank > reqJ.Rank
-        }
-        if reqI.Requirements.Gpus != reqJ.Requirements.Gpus {
-            return reqI.Requirements.Gpus > reqJ.Requirements.Gpus
-        }
-        if reqI.Requirements.Cpus != reqJ.Requirements.Cpus {
-            return reqI.Requirements.Cpus > reqJ.Requirements.Cpus
-        }
-        return reqI.Requirements.MemMb > reqJ.Requirements.MemMb
+        return requestLess(state.PendingRequests[i], state.PendingRequests[j])
     })
 
     responses := make([]ResourceGrant, 0)

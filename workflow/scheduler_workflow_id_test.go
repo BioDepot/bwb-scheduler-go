@@ -26,6 +26,7 @@ func runSetupAndReportSchedulerID(t *testing.T, parentID string) (childID, signa
 	env.OnActivity(fs.SetupRootDir, mock.Anything).Return("", nil).Maybe()
 
 	env.ExecuteWorkflow(func(ctx workflow.Context) error {
+pinLegacyScheduler(ctx)
 		selector := workflow.NewSelector(ctx)
 		exec := NewTemporalExecutor(ctx, &selector, nil, fs.LocalFS{},
 			map[string]WorkerInfo{"q": {QueueId: "q"}}, "storage", nil)
@@ -67,4 +68,11 @@ func TestResourceSchedulerWorkflowIDIsStableAndBounded(t *testing.T) {
 	require.NotEqual(t, a, resourceSchedulerWorkflowID("wf", "run2"))
 	long := resourceSchedulerWorkflowID(strings.Repeat("x", 500), "run1")
 	require.Less(t, len(long), 100)
+}
+
+// pinLegacyScheduler makes the workflow behave as one started before the
+// shared ledger existed: it records the default version for the change, as a
+// history made by 04b91ca or fb76cb5 replays.
+func pinLegacyScheduler(ctx workflow.Context) {
+	workflow.GetVersion(ctx, "shared-worker-ledger", workflow.DefaultVersion, workflow.DefaultVersion)
 }

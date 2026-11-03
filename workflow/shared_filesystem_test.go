@@ -206,6 +206,7 @@ func TestSharedFilesystemSetup(t *testing.T) {
 				}
 			})
 			env.ExecuteWorkflow(func(ctx workflow.Context) error {
+pinLegacyScheduler(ctx)
 				execs, err := sharedTestExecutors(ctx, mode != "disabled")
 				if err != nil {
 					return err

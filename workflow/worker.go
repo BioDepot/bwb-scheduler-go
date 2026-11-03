@@ -76,6 +76,8 @@ func StartWorker(
 		w.RegisterWorkflow(RunBwbWorkflowV0)
 		w.RegisterWorkflow(RunBwbWorkflowV1)
 		w.RegisterWorkflow(ResourceSchedulerWorkflow)
+		w.RegisterWorkflow(WorkerLedgerWorkflow)
+		w.RegisterActivity(&LedgerActivities{Client: c})
 		w.RegisterWorkflow(SlurmReconciliationWorkflow)
 		w.RegisterActivity(BuildSingularitySIF)
 		w.RegisterActivity(PersistDurableWorkflowRecordActivity)
