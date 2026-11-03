@@ -89,3 +89,19 @@ func replayStopped(t *testing.T, file, id string) {
 	require.NoError(t, replayer.ReplayWorkflowHistoryWithOptions(nil, history,
 		worker.ReplayWorkflowHistoryOptions{OriginalExecution: workflow.Execution{ID: id}}))
 }
+
+// A ledger history made by d26cc29, before the heartbeat back-off changed: a
+// worker killed and restarted several times, with heartbeat failures and
+// retries at 30, 120 and 480 s. Sanitized. The current code must replay it
+// with the earlier schedule (GetVersion "heartbeat-backoff-reset").
+func TestReplayLedgerHistoryFromBeforeBackoffChange(t *testing.T) {
+	f, err := os.Open("testdata/history_d26cc29_ledger_backoff.json")
+	require.NoError(t, err)
+	defer f.Close()
+	history, err := client.HistoryFromJSON(f, client.HistoryJSONOptions{})
+	require.NoError(t, err)
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(WorkerLedgerWorkflow)
+	require.NoError(t, replayer.ReplayWorkflowHistoryWithOptions(nil, history,
+		worker.ReplayWorkflowHistoryOptions{OriginalExecution: workflow.Execution{ID: "worker-ledger-q-b-86238ce42aaf0807dfcd"}}))
+}

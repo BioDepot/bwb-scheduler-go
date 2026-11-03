@@ -49,6 +49,9 @@ const (
 	ledgerRequestSignal    = "ledger-request"
 	ledgerReleaseSignal    = "ledger-release"
 	ledgerDeregisterSignal = "ledger-deregister"
+	// ledgerWorkerUpSignal is sent by a command worker when it starts polling
+	// its queue, so that the ledger does not wait for its retry timer.
+	ledgerWorkerUpSignal = "ledger-worker-up"
 
 	ledgerTickSeconds     = 5
 	ledgerLivenessSeconds = 30
@@ -272,6 +275,7 @@ func WorkerLedgerWorkflow(ctx workflow.Context, state LedgerState) error {
 	logger := workflow.GetLogger(ctx)
 	state.init()
 	queue := state.Queue
+	state.Sched.BackoffV1 = workflow.GetVersion(ctx, "heartbeat-backoff-reset", workflow.DefaultVersion, 1) != workflow.DefaultVersion
 
 	selector := workflow.NewSelector(ctx)
 	worker := state.Sched.Workers[queue]
@@ -283,6 +287,7 @@ func WorkerLedgerWorkflow(ctx workflow.Context, state LedgerState) error {
 	reqCh := workflow.GetSignalChannel(ctx, ledgerRequestSignal)
 	relCh := workflow.GetSignalChannel(ctx, ledgerReleaseSignal)
 	deregCh := workflow.GetSignalChannel(ctx, ledgerDeregisterSignal)
+	upCh := workflow.GetSignalChannel(ctx, ledgerWorkerUpSignal)
 
 	onRegister := func(reg LedgerRegistration) {
 		ack := state.register(reg)
@@ -305,6 +310,31 @@ func WorkerLedgerWorkflow(ctx workflow.Context, state LedgerState) error {
 		logger.Info("After deregistration", "holders", len(state.Holders), "activeGrants", len(state.Active), "usedCpus", state.Sched.Workers[queue].UsedResources.Cpus)
 	}
 
+	onWorkerUp := func() {
+		w := state.Sched.Workers[queue]
+		if !state.Sched.BackoffV1 || w.IsAlive {
+			return
+		}
+		// A poller exists on the queue now: mark the worker usable. If no
+		// retried heartbeat is already in flight, start one now instead of
+		// waiting for the retry timer. The failure count restarts when that
+		// heartbeat has run longer than the schedule-to-start timeout, as for
+		// a timer-driven retry.
+		logger.Info("Worker is up, retrying heartbeat now", "workerId", queue)
+		w.IsAlive = true
+		state.Sched.Workers[queue] = w
+		if _, inFlight := state.Sched.SecondsSinceHeartbeatSched[queue]; inFlight {
+			return
+		}
+		delete(state.Sched.SecondsUntilHeartbeatRetry, queue)
+		registerHeartbeatActivity(ctx, selector, &state.Sched, queue)
+		state.Sched.SecondsSinceHeartbeatSched[queue] = 0
+	}
+	selector.AddReceive(upCh, func(c workflow.ReceiveChannel, _ bool) {
+		var from string
+		c.Receive(ctx, &from)
+		onWorkerUp()
+	})
 	selector.AddReceive(regCh, func(c workflow.ReceiveChannel, _ bool) {
 		var v LedgerRegistration
 		c.Receive(ctx, &v)
@@ -349,6 +379,11 @@ func WorkerLedgerWorkflow(ctx workflow.Context, state LedgerState) error {
 			var dereg LedgerDeregistration
 			for deregCh.ReceiveAsync(&dereg) {
 				onDeregister(dereg)
+				progressed = true
+			}
+			var up string
+			for upCh.ReceiveAsync(&up) {
+				onWorkerUp()
 				progressed = true
 			}
 			if !progressed {
