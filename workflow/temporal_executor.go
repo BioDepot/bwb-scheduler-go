@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"go-scheduler/fs"
@@ -86,10 +88,40 @@ func (exec *TemporalExecutor) SetFileXferHandler(xferHandler FileXferHandler) {
 	exec.handleFileXfers = xferHandler
 }
 
+// legacySchedulerWorkflowID is the fixed ID used before the resource scheduler
+// was given one ID per parent workflow. Only one workflow per namespace could
+// hold it at a time.
+const legacySchedulerWorkflowID = "sched-workflow"
+
+// resourceSchedulerWorkflowID derives the child's ID from the parent's own
+// execution, as slurmPollerWorkflowID does, so that workflows in one namespace
+// do not collide. The run ID keeps two runs that share a parent workflow ID
+// apart.
+func resourceSchedulerWorkflowID(parentWorkflowID, parentRunID string) string {
+	sum := sha256.Sum256([]byte(parentWorkflowID + "\x00" + parentRunID))
+	prefix := safeWorkflowIDComponent(parentWorkflowID)
+	if len(prefix) > 24 {
+		prefix = prefix[:24]
+	}
+	return fmt.Sprintf("sched-workflow-%s-%s", prefix, hex.EncodeToString(sum[:10]))
+}
+
+// schedulerWorkflowID returns the child ID to use. Histories recorded before
+// the change started the child as "sched-workflow"; GetVersion keeps them
+// replayable. New executions record the marker and use the derived ID.
+func (exec *TemporalExecutor) schedulerWorkflowID() string {
+	v := workflow.GetVersion(exec.ctx, "resource-scheduler-workflow-id", workflow.DefaultVersion, 1)
+	if v == workflow.DefaultVersion {
+		return legacySchedulerWorkflowID
+	}
+	info := workflow.GetInfo(exec.ctx).WorkflowExecution
+	return resourceSchedulerWorkflowID(info.ID, info.RunID)
+}
+
 func (exec *TemporalExecutor) Setup(v1 bool) error {
 	childCtx, cancelChild := workflow.WithCancel(exec.ctx)
 	schedChildWfOptions := workflow.ChildWorkflowOptions{
-		WorkflowID: "sched-workflow",
+		WorkflowID: exec.schedulerWorkflowID(),
 		TaskQueue:  SCHEDULER_QUEUE,
 	}
 	childCtx = workflow.WithChildOptions(childCtx, schedChildWfOptions)
