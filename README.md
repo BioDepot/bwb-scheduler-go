@@ -149,12 +149,12 @@ checking is strict. The scheduler uses native gzip inputs and does not
 transcode them. CellBender requests are rejected unless they specify both
 `use_gpu: true` and `--cuda`.
 
-For the cardiac pilot, a Go site config can reuse the Python Slurm and
+For a staged GPU run, a Go site config can reuse the Python Slurm and
 SSH/Docker targets, but must add an explicit GPU-local root, for example
-`"allowed_roots": ["/mnt/pikachu/MSK_Perturbseq06_Cardiac_temporal_workbench_20260918T213950Z"]`
+`"allowed_roots": ["/data/gpu_runs/<run_id>"]`
 under `executors.ssh_docker`. Include every local input/output root the GPU
-stage will touch. The pilot request is at
-`/mnt/pikachu/morphic-provenance-msk-temporal-workbench/runs/msk_perturbseq06_cardiac/20260918T213950Z_temporal_workbench_pilot/outputs/scheduler-request.dry-run.json`.
+stage will touch. Keep the dry-run request with the run's outputs, for example
+`<run_dir>/outputs/scheduler-request.dry-run.json`.
 
 The submitted JSON must name the orchestration, Globus, Slurm, and GPU task
 queues to match the workers. Point the Workbench scheduler URL at the Go
