@@ -894,6 +894,9 @@ func main() {
 	validateStagedCmd.MarkFlagRequired("file")
 	rootCmd.AddCommand(validateStagedCmd)
 	rootCmd.AddCommand(serveCmd)
+	rootCmd.AddCommand(artifactTransferCommand())
+	rootCmd.AddCommand(bundleRunCommand())
+	rootCmd.AddCommand(hybridWorkersCommand())
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatalln(err)
 	}

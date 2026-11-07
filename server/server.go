@@ -7,7 +7,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"go-scheduler/executioncontract"
 	"go-scheduler/fs"
+	"go-scheduler/hybrid"
 	"go-scheduler/parsing"
 	"go-scheduler/workflow"
 	"log/slog"
@@ -25,6 +27,7 @@ import (
 )
 
 type StartWorkflowRequest struct {
+	ExecutionPlan    json.RawMessage     `json:"execution_plan,omitempty"`
 	Schema           string              `json:"schema"`
 	ResolvedWorkflow json.RawMessage     `json:"resolved_workflow"`
 	WorkerInfo       workflow.WorkerInfo `json:"worker_info"`
@@ -90,6 +93,7 @@ type ReconcileSlurmResponse struct {
 }
 
 type Server struct {
+	hybridConfig   *hybrid.Config
 	temporalClient client.Client
 	logger         *slog.Logger
 	bearerToken    string
@@ -120,7 +124,17 @@ func NewServer(logger *slog.Logger) (*Server, error) {
 			evidenceDir = filepath.Join(schedDir, "workflow-evidence")
 		}
 	}
+	var hybridConfig *hybrid.Config
+	if path := strings.TrimSpace(os.Getenv("BWB_HYBRID_CONFIG")); path != "" {
+		cfg, err := hybrid.LoadConfig(path)
+		if err != nil {
+			c.Close()
+			return nil, err
+		}
+		hybridConfig = &cfg
+	}
 	return &Server{
+		hybridConfig:   hybridConfig,
 		temporalClient: c,
 		logger:         logger,
 		bearerToken:    strings.TrimSpace(os.Getenv("BWB_API_BEARER_TOKEN")),
@@ -134,6 +148,17 @@ func (s *Server) Close() {
 }
 
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/capabilities", s.authenticated(s.handleCapabilities))
+	mux.HandleFunc("/start_hybrid_workflow", s.authenticated(s.handleStartHybrid))
+	mux.HandleFunc("/hybrid_logs", s.authenticated(s.handleHybridInspect))
+	mux.HandleFunc("/hybrid_reconcile", s.authenticated(s.handleHybridInspect))
+	mux.HandleFunc("/hybrid_collect", s.authenticated(s.handleHybridCollect))
+	mux.HandleFunc("/hybrid_artifacts", s.authenticated(s.handleHybridArtifacts))
+	mux.HandleFunc("/hybrid_artifact_access", s.authenticated(s.handleHybridArtifacts))
+	mux.HandleFunc("/validate_hybrid_plan", s.authenticated(s.handleValidateHybrid))
+	mux.HandleFunc("/hybrid_workflow_status", s.authenticated(s.handleHybridStatus))
+	mux.HandleFunc("/cancel_hybrid_workflow", s.authenticated(s.handleHybridCancel))
+	mux.HandleFunc("/hybrid_checkpoint_decision", s.authenticated(s.handleCheckpointDecision))
 	mux.HandleFunc("/start_workflow", s.authenticated(s.handleStartWorkflow))
 	mux.HandleFunc("/start_staged_slurm_gpu_workflow", s.authenticated(s.handleStartStagedWorkflow))
 	mux.HandleFunc("/staged_slurm_gpu_workflow_status", s.authenticated(s.handleStagedWorkflowStatus))
@@ -239,7 +264,23 @@ func startRequestFingerprint(req StartWorkflowRequest) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	var executionPlan any
+	if len(req.ExecutionPlan) != 0 {
+		plan, err := executioncontract.Validate(req.ExecutionPlan)
+		if err != nil {
+			return "", err
+		}
+		if plan["schema"] != executioncontract.PlanSchema {
+			return "", fmt.Errorf("expected execution plan")
+		}
+		identity := plan["identity"].(map[string]any)
+		if identity["request_id"] != req.RequestID || identity["workflow_id"] != req.WorkflowID || identity["workbench_run_id"] != req.WorkbenchRunID {
+			return "", fmt.Errorf("execution plan identity does not match request")
+		}
+		executionPlan = plan
+	}
 	payload, err := json.Marshal(struct {
+		ExecutionPlan    any                 `json:"execution_plan,omitempty"`
 		Schema           string              `json:"schema"`
 		ResolvedWorkflow any                 `json:"resolved_workflow"`
 		WorkerInfo       workflow.WorkerInfo `json:"worker_info"`
@@ -250,6 +291,7 @@ func startRequestFingerprint(req StartWorkflowRequest) (string, error) {
 		ExecutorID       string              `json:"executor_id"`
 		SiteProfileID    string              `json:"site_profile_id"`
 	}{
+		ExecutionPlan:    executionPlan,
 		Schema:           req.Schema,
 		ResolvedWorkflow: resolvedWorkflow,
 		WorkerInfo:       req.WorkerInfo,
@@ -370,6 +412,11 @@ func (s *Server) handleStartWorkflow(w http.ResponseWriter, r *http.Request) {
 	var req StartWorkflowRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid request body: %s", err))
+		return
+	}
+	// Do not silently discard placement and execute it using the legacy default.
+	if len(req.ExecutionPlan) != 0 {
+		writeError(w, http.StatusBadRequest, "hybrid execution plans are contract-only until the Temporal placement runtime is installed")
 		return
 	}
 
