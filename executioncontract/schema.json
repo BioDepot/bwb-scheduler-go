@@ -1,0 +1,1075 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://biodepot.org/schemas/execution-contracts-v1.json",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/aws_profile"
+    },
+    {
+      "$ref": "#/$defs/placement"
+    },
+    {
+      "$ref": "#/$defs/storage"
+    },
+    {
+      "$ref": "#/$defs/plan"
+    },
+    {
+      "$ref": "#/$defs/policy"
+    }
+  ],
+  "$defs": {
+    "profile_ref": {
+      "type": "object",
+      "properties": {
+        "profile_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "profile_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "definition_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "profile_id",
+        "revision",
+        "profile_hash",
+        "definition_hash"
+      ],
+      "additionalProperties": false
+    },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "os": {
+          "enum": [
+            "linux"
+          ]
+        },
+        "architecture": {
+          "enum": [
+            "x86_64",
+            "arm64"
+          ]
+        },
+        "manifest_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "runner_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "os",
+        "architecture",
+        "manifest_hash",
+        "runner_hash"
+      ],
+      "additionalProperties": false
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "on_success": {
+          "enum": [
+            "delete",
+            "retain"
+          ]
+        },
+        "on_failure": {
+          "enum": [
+            "retain"
+          ]
+        },
+        "retain_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 2592000
+        }
+      },
+      "required": [
+        "on_success",
+        "on_failure",
+        "retain_seconds"
+      ],
+      "additionalProperties": false
+    },
+    "volume": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mount_path": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9_./-]+$",
+              "maxLength": 1024
+            },
+            "read_only": {
+              "type": "boolean"
+            },
+            "retention": {
+              "$ref": "#/$defs/retention"
+            },
+            "mode": {
+              "enum": [
+                "new"
+              ]
+            },
+            "size_gib": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 16384
+            },
+            "volume_type": {
+              "enum": [
+                "gp3"
+              ]
+            },
+            "encrypted": {
+              "enum": [
+                true
+              ]
+            },
+            "kms_key_arn": {
+              "type": "string",
+              "pattern": "^arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[A-Za-z0-9_./:-]+$"
+            }
+          },
+          "required": [
+            "mount_path",
+            "read_only",
+            "retention",
+            "mode",
+            "size_gib",
+            "volume_type",
+            "encrypted"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mount_path": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9_./-]+$",
+              "maxLength": 1024
+            },
+            "read_only": {
+              "type": "boolean"
+            },
+            "retention": {
+              "$ref": "#/$defs/retention"
+            },
+            "mode": {
+              "enum": [
+                "existing"
+              ]
+            },
+            "volume_id": {
+              "type": "string",
+              "pattern": "^vol-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            }
+          },
+          "required": [
+            "mount_path",
+            "read_only",
+            "retention",
+            "mode",
+            "volume_id"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mount_path": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9_./-]+$",
+              "maxLength": 1024
+            },
+            "read_only": {
+              "type": "boolean"
+            },
+            "retention": {
+              "$ref": "#/$defs/retention"
+            },
+            "mode": {
+              "enum": [
+                "mounted"
+              ]
+            },
+            "volume_id": {
+              "type": "string",
+              "pattern": "^vol-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            }
+          },
+          "required": [
+            "mount_path",
+            "read_only",
+            "retention",
+            "mode",
+            "volume_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "compute": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "managed"
+              ]
+            },
+            "image_id": {
+              "type": "string",
+              "pattern": "^ami-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            },
+            "instance_type": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "subnet_id": {
+              "type": "string",
+              "pattern": "^subnet-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            },
+            "security_group_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^sg-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+              },
+              "minItems": 1,
+              "maxItems": 1000,
+              "uniqueItems": true
+            },
+            "instance_profile_arn": {
+              "type": "string",
+              "pattern": "^arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[A-Za-z0-9_./:-]+$"
+            },
+            "retention": {
+              "type": "object",
+              "properties": {
+                "on_success": {
+                  "enum": [
+                    "terminate"
+                  ]
+                },
+                "on_failure": {
+                  "enum": [
+                    "retain"
+                  ]
+                },
+                "retain_seconds": {
+                  "type": "integer",
+                  "minimum": 60,
+                  "maximum": 2592000
+                }
+              },
+              "required": [
+                "on_success",
+                "on_failure",
+                "retain_seconds"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "mode",
+            "image_id",
+            "instance_type",
+            "subnet_id",
+            "security_group_ids",
+            "instance_profile_arn",
+            "retention"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "enum": [
+                "existing"
+              ]
+            },
+            "instance_id": {
+              "type": "string",
+              "pattern": "^i-(?:[a-f0-9]{8}|[a-f0-9]{17})$"
+            }
+          },
+          "required": [
+            "mode",
+            "instance_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "aws_profile": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            "morphic.aws_ec2_profile/v1"
+          ]
+        },
+        "account_id": {
+          "type": "string",
+          "pattern": "^[0-9]{12}$"
+        },
+        "region": {
+          "type": "string",
+          "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+$"
+        },
+        "controller_role_arn": {
+          "type": "string",
+          "pattern": "^arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[A-Za-z0-9_./:-]+$"
+        },
+        "compute": {
+          "$ref": "#/$defs/compute"
+        },
+        "runtime": {
+          "$ref": "#/$defs/runtime"
+        },
+        "s3": {
+          "type": "object",
+          "properties": {
+            "input_prefixes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+                "maxLength": 2048
+              },
+              "minItems": 1,
+              "maxItems": 1000,
+              "uniqueItems": true
+            },
+            "output_prefix": {
+              "type": "string",
+              "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+              "maxLength": 2048
+            },
+            "encryption": {
+              "enum": [
+                "AES256",
+                "aws:kms"
+              ]
+            },
+            "kms_key_arn": {
+              "type": "string",
+              "pattern": "^arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:[A-Za-z0-9_./:-]+$"
+            }
+          },
+          "required": [
+            "input_prefixes",
+            "output_prefix",
+            "encryption"
+          ],
+          "additionalProperties": false
+        },
+        "volumes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/volume"
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "limits": {
+          "type": "object",
+          "properties": {
+            "bootstrap_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 3600
+            },
+            "job_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 604800
+            },
+            "collection_seconds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400
+            },
+            "max_concurrent_jobs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          "required": [
+            "bootstrap_seconds",
+            "job_seconds",
+            "collection_seconds",
+            "max_concurrent_jobs"
+          ],
+          "additionalProperties": false
+        },
+        "controller_auth_mode": {
+          "enum": [
+            "assume_role",
+            "default_chain"
+          ]
+        }
+      },
+      "required": [
+        "schema",
+        "account_id",
+        "region",
+        "compute",
+        "runtime",
+        "s3",
+        "volumes",
+        "limits"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "controller_auth_mode": {
+                "const": "default_chain"
+              }
+            },
+            "required": [
+              "controller_auth_mode"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "controller_role_arn"
+              ]
+            }
+          },
+          "else": {
+            "required": [
+              "controller_role_arn"
+            ]
+          }
+        }
+      ]
+    },
+    "placement": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            "morphic.execution_placement/v1"
+          ]
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "executor_key": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "kind": {
+                "enum": [
+                  "temporal_worker",
+                  "aws_ec2",
+                  "slurm"
+                ]
+              },
+              "profile": {
+                "$ref": "#/$defs/profile_ref"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+                },
+                "minItems": 0,
+                "maxItems": 1000,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "node_id",
+              "executor_key",
+              "kind",
+              "profile",
+              "depends_on"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema",
+        "nodes"
+      ],
+      "additionalProperties": false
+    },
+    "source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "s3"
+              ]
+            },
+            "uri": {
+              "type": "string",
+              "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+              "maxLength": 2048
+            },
+            "version_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "uri",
+            "sha256",
+            "size_bytes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "server_file",
+                "ebs_path"
+              ]
+            },
+            "executor_key": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^/[A-Za-z0-9_./-]+$",
+              "maxLength": 1024
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "kind",
+            "executor_key",
+            "path",
+            "sha256",
+            "size_bytes"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "stage_output"
+              ]
+            },
+            "node_id": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+            },
+            "path": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+              "maxLength": 1024
+            }
+          },
+          "required": [
+            "kind",
+            "node_id",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "route": {
+      "type": "object",
+      "properties": {
+        "route_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "source_executor_key": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "destination_executor_key": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "worker_queue": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "staging_prefix": {
+          "type": "string",
+          "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+          "maxLength": 2048
+        }
+      },
+      "required": [
+        "route_id",
+        "source_executor_key",
+        "destination_executor_key",
+        "worker_queue",
+        "staging_prefix"
+      ],
+      "additionalProperties": false
+    },
+    "storage": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            "morphic.storage_plan/v1"
+          ]
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "source": {
+                "$ref": "#/$defs/source"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "source"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/route"
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "transfers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "artifact_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "to_node": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "target_path": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+                "maxLength": 1024
+              },
+              "route_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              }
+            },
+            "required": [
+              "artifact_id",
+              "to_node",
+              "target_path",
+              "route_id"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "publications": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "node_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+              },
+              "path": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_][A-Za-z0-9_./-]*$",
+                "maxLength": 1024
+              },
+              "destination_prefix": {
+                "type": "string",
+                "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+                "maxLength": 2048
+              }
+            },
+            "required": [
+              "node_id",
+              "path",
+              "destination_prefix"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema",
+        "artifacts",
+        "routes",
+        "transfers",
+        "publications"
+      ],
+      "additionalProperties": false
+    },
+    "identity": {
+      "type": "object",
+      "properties": {
+        "owner_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "workbench_run_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "request_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "workflow_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "owner_id",
+        "workbench_run_id",
+        "request_id",
+        "workflow_id",
+        "attempt"
+      ],
+      "additionalProperties": false
+    },
+    "review": {
+      "type": "object",
+      "properties": {
+        "interaction_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "response_id": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        },
+        "state_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "approval_evidence_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "interaction_id",
+        "revision",
+        "response_id",
+        "state_hash",
+        "approval_evidence_hash"
+      ],
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            "morphic.execution_plan/v1"
+          ]
+        },
+        "identity": {
+          "$ref": "#/$defs/identity"
+        },
+        "graph_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "params_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "bundle_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "placement": {
+          "$ref": "#/$defs/placement"
+        },
+        "storage": {
+          "$ref": "#/$defs/storage"
+        },
+        "review": {
+          "$ref": "#/$defs/review"
+        },
+        "checkpoints": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/checkpoint"
+          }
+        }
+      },
+      "required": [
+        "schema",
+        "identity",
+        "graph_hash",
+        "params_hash",
+        "bundle_hash",
+        "placement",
+        "storage",
+        "review"
+      ],
+      "additionalProperties": false
+    },
+    "policy": {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "enum": [
+            "morphic.execution_worker_policy/v1"
+          ]
+        },
+        "profiles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "reference": {
+                "$ref": "#/$defs/profile_ref"
+              },
+              "kind": {
+                "enum": [
+                  "temporal_worker",
+                  "aws_ec2",
+                  "slurm"
+                ]
+              },
+              "allowed_roots": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^/[A-Za-z0-9_./-]+$",
+                  "maxLength": 1024
+                },
+                "minItems": 0,
+                "maxItems": 1000,
+                "uniqueItems": true
+              },
+              "aws": {
+                "$ref": "#/$defs/aws_profile"
+              }
+            },
+            "required": [
+              "reference",
+              "kind",
+              "allowed_roots"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/route"
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "input_prefixes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+            "maxLength": 2048
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "publication_prefixes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]/[A-Za-z0-9_./-]+$",
+            "maxLength": 2048
+          },
+          "minItems": 0,
+          "maxItems": 1000,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schema",
+        "profiles",
+        "routes",
+        "input_prefixes",
+        "publication_prefixes"
+      ],
+      "additionalProperties": false
+    },
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "checkpoint_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "after_nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+          }
+        },
+        "before_nodes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+          }
+        },
+        "mode": {
+          "enum": [
+            "automatic",
+            "manual"
+          ]
+        },
+        "review_timeout_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 2592000
+        }
+      },
+      "required": [
+        "checkpoint_id",
+        "description",
+        "after_nodes",
+        "before_nodes",
+        "mode"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "manual"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "review_timeout_seconds"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "review_timeout_seconds"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  }
+}

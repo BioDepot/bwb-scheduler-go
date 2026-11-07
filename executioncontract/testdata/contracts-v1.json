@@ -1,0 +1,2101 @@
+{
+  "valid": {
+    "managed": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+      "compute": {
+        "mode": "managed",
+        "image_id": "ami-0123456789abcdef0",
+        "instance_type": "m6i.large",
+        "subnet_id": "subnet-0123456789abcdef0",
+        "security_group_ids": [
+          "sg-0123456789abcdef0"
+        ],
+        "instance_profile_arn": "arn:aws:iam::123456789012:instance-profile/runner",
+        "retention": {
+          "on_success": "terminate",
+          "on_failure": "retain",
+          "retain_seconds": 3600
+        }
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/managed/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "new",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "delete",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          },
+          "size_gib": 100,
+          "volume_type": "gp3",
+          "encrypted": true
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 2
+      }
+    },
+    "existing": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+      "compute": {
+        "mode": "existing",
+        "instance_id": "i-0123456789abcdef0"
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/existing/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "existing",
+          "volume_id": "vol-0123456789abcdef0",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "retain",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          }
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 1
+      }
+    },
+    "mounted": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+      "compute": {
+        "mode": "existing",
+        "instance_id": "i-0123456789abcdef0"
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/existing/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "mounted",
+          "volume_id": "vol-0123456789abcdef0",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "retain",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          }
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 1
+      }
+    },
+    "placement": {
+      "schema": "morphic.execution_placement/v1",
+      "nodes": [
+        {
+          "node_id": "prepare",
+          "executor_key": "local-a",
+          "kind": "temporal_worker",
+          "profile": {
+            "profile_id": "local-a",
+            "revision": 1,
+            "profile_hash": "sha256:78a5913f2c2fda6d8ef6bca76f2a7ec8ff1526843e45ddd2ebbf71e3b4916815",
+            "definition_hash": "sha256:78740ec2050f0eb18e5c9a33b2150e82a59872cc4fd1a72e48bd0343a006bbb5"
+          },
+          "depends_on": []
+        },
+        {
+          "node_id": "align",
+          "executor_key": "ec2-managed",
+          "kind": "aws_ec2",
+          "profile": {
+            "profile_id": "ec2-managed",
+            "revision": 1,
+            "profile_hash": "sha256:ce607130eb28449b3d6999c655fc9f5e17e8e81f15e03ba2f815df5cd8fa75ca",
+            "definition_hash": "sha256:f1abb9c7b3550a87f264567fae7758e95ec5f073f6f319687a6e012f999044fa"
+          },
+          "depends_on": [
+            "prepare"
+          ]
+        },
+        {
+          "node_id": "count",
+          "executor_key": "ec2-existing",
+          "kind": "aws_ec2",
+          "profile": {
+            "profile_id": "ec2-existing",
+            "revision": 1,
+            "profile_hash": "sha256:d73b1840dd272be68206a5041193c12550d60e7bf4ade7d5205de04359697fb8",
+            "definition_hash": "sha256:86af327d439771a666d001af8b4cb6be9db4625bb6957b28b624c63035907422"
+          },
+          "depends_on": [
+            "align"
+          ]
+        },
+        {
+          "node_id": "report",
+          "executor_key": "slurm-a",
+          "kind": "slurm",
+          "profile": {
+            "profile_id": "slurm-a",
+            "revision": 1,
+            "profile_hash": "sha256:39e2f75923a0a9194b9ecf523f7e4127242455853fc268d2302bbbda97ece7cb",
+            "definition_hash": "sha256:451c5bebd68cfd3417726caad11b0659376ab08ab903f4c6ff6482301ffd4983"
+          },
+          "depends_on": [
+            "count"
+          ]
+        }
+      ]
+    },
+    "storage": {
+      "schema": "morphic.storage_plan/v1",
+      "artifacts": [
+        {
+          "artifact_id": "reads",
+          "source": {
+            "kind": "s3",
+            "uri": "s3://workbench-example/input/reads.fastq",
+            "sha256": "sha256:abf10a0d647457a2d27c9007f46ad3e87870c03ff6b7a492968131e48bb87cc7",
+            "size_bytes": 1024
+          }
+        },
+        {
+          "artifact_id": "prepare-out",
+          "source": {
+            "kind": "stage_output",
+            "node_id": "prepare",
+            "path": "out/result"
+          }
+        },
+        {
+          "artifact_id": "align-out",
+          "source": {
+            "kind": "stage_output",
+            "node_id": "align",
+            "path": "out/result"
+          }
+        },
+        {
+          "artifact_id": "count-out",
+          "source": {
+            "kind": "stage_output",
+            "node_id": "count",
+            "path": "out/result"
+          }
+        }
+      ],
+      "routes": [
+        {
+          "route_id": "input",
+          "source_executor_key": "s3",
+          "destination_executor_key": "local-a",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/local/"
+        },
+        {
+          "route_id": "prepare-align",
+          "source_executor_key": "local-a",
+          "destination_executor_key": "ec2-managed",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/local/"
+        },
+        {
+          "route_id": "align-count",
+          "source_executor_key": "ec2-managed",
+          "destination_executor_key": "ec2-existing",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/managed/"
+        },
+        {
+          "route_id": "count-report",
+          "source_executor_key": "ec2-existing",
+          "destination_executor_key": "slurm-a",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/existing/"
+        }
+      ],
+      "transfers": [
+        {
+          "artifact_id": "reads",
+          "to_node": "prepare",
+          "target_path": "in/data",
+          "route_id": "input"
+        },
+        {
+          "artifact_id": "prepare-out",
+          "to_node": "align",
+          "target_path": "in/data",
+          "route_id": "prepare-align"
+        },
+        {
+          "artifact_id": "align-out",
+          "to_node": "count",
+          "target_path": "in/data",
+          "route_id": "align-count"
+        },
+        {
+          "artifact_id": "count-out",
+          "to_node": "report",
+          "target_path": "in/data",
+          "route_id": "count-report"
+        }
+      ],
+      "publications": [
+        {
+          "node_id": "report",
+          "path": "out/report",
+          "destination_prefix": "s3://workbench-example/results/run-1/"
+        }
+      ]
+    },
+    "hybrid": {
+      "schema": "morphic.execution_plan/v1",
+      "identity": {
+        "owner_id": "owner-1",
+        "workbench_run_id": "run-1",
+        "request_id": "request-1",
+        "workflow_id": "workflow-1",
+        "attempt": 1
+      },
+      "graph_hash": "sha256:3bc9159414cdaeda51f5f475f0a3ae4ed3e32f155e48a2271298f15b7945f298",
+      "params_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "bundle_hash": "sha256:4c522949265daa3973b2389b594a235b5c6e47c70d2af6e23bd14f8173f56280",
+      "placement": {
+        "schema": "morphic.execution_placement/v1",
+        "nodes": [
+          {
+            "node_id": "prepare",
+            "executor_key": "local-a",
+            "kind": "temporal_worker",
+            "profile": {
+              "profile_id": "local-a",
+              "revision": 1,
+              "profile_hash": "sha256:78a5913f2c2fda6d8ef6bca76f2a7ec8ff1526843e45ddd2ebbf71e3b4916815",
+              "definition_hash": "sha256:78740ec2050f0eb18e5c9a33b2150e82a59872cc4fd1a72e48bd0343a006bbb5"
+            },
+            "depends_on": []
+          },
+          {
+            "node_id": "align",
+            "executor_key": "ec2-managed",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-managed",
+              "revision": 1,
+              "profile_hash": "sha256:ce607130eb28449b3d6999c655fc9f5e17e8e81f15e03ba2f815df5cd8fa75ca",
+              "definition_hash": "sha256:f1abb9c7b3550a87f264567fae7758e95ec5f073f6f319687a6e012f999044fa"
+            },
+            "depends_on": [
+              "prepare"
+            ]
+          },
+          {
+            "node_id": "count",
+            "executor_key": "ec2-existing",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-existing",
+              "revision": 1,
+              "profile_hash": "sha256:d73b1840dd272be68206a5041193c12550d60e7bf4ade7d5205de04359697fb8",
+              "definition_hash": "sha256:86af327d439771a666d001af8b4cb6be9db4625bb6957b28b624c63035907422"
+            },
+            "depends_on": [
+              "align"
+            ]
+          },
+          {
+            "node_id": "report",
+            "executor_key": "slurm-a",
+            "kind": "slurm",
+            "profile": {
+              "profile_id": "slurm-a",
+              "revision": 1,
+              "profile_hash": "sha256:39e2f75923a0a9194b9ecf523f7e4127242455853fc268d2302bbbda97ece7cb",
+              "definition_hash": "sha256:451c5bebd68cfd3417726caad11b0659376ab08ab903f4c6ff6482301ffd4983"
+            },
+            "depends_on": [
+              "count"
+            ]
+          }
+        ]
+      },
+      "storage": {
+        "schema": "morphic.storage_plan/v1",
+        "artifacts": [
+          {
+            "artifact_id": "reads",
+            "source": {
+              "kind": "s3",
+              "uri": "s3://workbench-example/input/reads.fastq",
+              "sha256": "sha256:abf10a0d647457a2d27c9007f46ad3e87870c03ff6b7a492968131e48bb87cc7",
+              "size_bytes": 1024
+            }
+          },
+          {
+            "artifact_id": "prepare-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "prepare",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "align-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "align",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "count-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "count",
+              "path": "out/result"
+            }
+          }
+        ],
+        "routes": [
+          {
+            "route_id": "input",
+            "source_executor_key": "s3",
+            "destination_executor_key": "local-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "prepare-align",
+            "source_executor_key": "local-a",
+            "destination_executor_key": "ec2-managed",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "align-count",
+            "source_executor_key": "ec2-managed",
+            "destination_executor_key": "ec2-existing",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/managed/"
+          },
+          {
+            "route_id": "count-report",
+            "source_executor_key": "ec2-existing",
+            "destination_executor_key": "slurm-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/existing/"
+          }
+        ],
+        "transfers": [
+          {
+            "artifact_id": "reads",
+            "to_node": "prepare",
+            "target_path": "in/data",
+            "route_id": "input"
+          },
+          {
+            "artifact_id": "prepare-out",
+            "to_node": "align",
+            "target_path": "in/data",
+            "route_id": "prepare-align"
+          },
+          {
+            "artifact_id": "align-out",
+            "to_node": "count",
+            "target_path": "in/data",
+            "route_id": "align-count"
+          },
+          {
+            "artifact_id": "count-out",
+            "to_node": "report",
+            "target_path": "in/data",
+            "route_id": "count-report"
+          }
+        ],
+        "publications": [
+          {
+            "node_id": "report",
+            "path": "out/report",
+            "destination_prefix": "s3://workbench-example/results/run-1/"
+          }
+        ]
+      },
+      "review": {
+        "interaction_id": "review-1",
+        "revision": 1,
+        "response_id": "response-1",
+        "state_hash": "sha256:76404da28a8b9f4e7ad4912faadc830b6f93c18327147c8955e7eea9dca94a3f",
+        "approval_evidence_hash": "sha256:e08ea766d3f98deebe47d0faef1d2a614f3af8f4ab14ea438b8b0db4d1cd3584"
+      }
+    },
+    "policy": {
+      "schema": "morphic.execution_worker_policy/v1",
+      "profiles": [
+        {
+          "reference": {
+            "profile_id": "local-a",
+            "revision": 1,
+            "profile_hash": "sha256:78a5913f2c2fda6d8ef6bca76f2a7ec8ff1526843e45ddd2ebbf71e3b4916815",
+            "definition_hash": "sha256:78740ec2050f0eb18e5c9a33b2150e82a59872cc4fd1a72e48bd0343a006bbb5"
+          },
+          "kind": "temporal_worker",
+          "allowed_roots": [
+            "/data"
+          ]
+        },
+        {
+          "reference": {
+            "profile_id": "ec2-managed",
+            "revision": 1,
+            "profile_hash": "sha256:ce607130eb28449b3d6999c655fc9f5e17e8e81f15e03ba2f815df5cd8fa75ca",
+            "definition_hash": "sha256:f1abb9c7b3550a87f264567fae7758e95ec5f073f6f319687a6e012f999044fa"
+          },
+          "kind": "aws_ec2",
+          "allowed_roots": [
+            "/data"
+          ],
+          "aws": {
+            "schema": "morphic.aws_ec2_profile/v1",
+            "account_id": "123456789012",
+            "region": "us-west-2",
+            "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+            "compute": {
+              "mode": "managed",
+              "image_id": "ami-0123456789abcdef0",
+              "instance_type": "m6i.large",
+              "subnet_id": "subnet-0123456789abcdef0",
+              "security_group_ids": [
+                "sg-0123456789abcdef0"
+              ],
+              "instance_profile_arn": "arn:aws:iam::123456789012:instance-profile/runner",
+              "retention": {
+                "on_success": "terminate",
+                "on_failure": "retain",
+                "retain_seconds": 3600
+              }
+            },
+            "runtime": {
+              "os": "linux",
+              "architecture": "x86_64",
+              "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+              "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+            },
+            "s3": {
+              "input_prefixes": [
+                "s3://workbench-example/input/",
+                "s3://workbench-example/staging/"
+              ],
+              "output_prefix": "s3://workbench-example/staging/managed/",
+              "encryption": "AES256"
+            },
+            "volumes": [
+              {
+                "mode": "new",
+                "mount_path": "/work",
+                "read_only": false,
+                "retention": {
+                  "on_success": "delete",
+                  "on_failure": "retain",
+                  "retain_seconds": 3600
+                },
+                "size_gib": 100,
+                "volume_type": "gp3",
+                "encrypted": true
+              }
+            ],
+            "limits": {
+              "bootstrap_seconds": 300,
+              "job_seconds": 3600,
+              "collection_seconds": 300,
+              "max_concurrent_jobs": 2
+            }
+          }
+        },
+        {
+          "reference": {
+            "profile_id": "ec2-existing",
+            "revision": 1,
+            "profile_hash": "sha256:d73b1840dd272be68206a5041193c12550d60e7bf4ade7d5205de04359697fb8",
+            "definition_hash": "sha256:86af327d439771a666d001af8b4cb6be9db4625bb6957b28b624c63035907422"
+          },
+          "kind": "aws_ec2",
+          "allowed_roots": [
+            "/data"
+          ],
+          "aws": {
+            "schema": "morphic.aws_ec2_profile/v1",
+            "account_id": "123456789012",
+            "region": "us-west-2",
+            "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+            "compute": {
+              "mode": "existing",
+              "instance_id": "i-0123456789abcdef0"
+            },
+            "runtime": {
+              "os": "linux",
+              "architecture": "x86_64",
+              "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+              "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+            },
+            "s3": {
+              "input_prefixes": [
+                "s3://workbench-example/input/",
+                "s3://workbench-example/staging/"
+              ],
+              "output_prefix": "s3://workbench-example/staging/existing/",
+              "encryption": "AES256"
+            },
+            "volumes": [
+              {
+                "mode": "existing",
+                "volume_id": "vol-0123456789abcdef0",
+                "mount_path": "/work",
+                "read_only": false,
+                "retention": {
+                  "on_success": "retain",
+                  "on_failure": "retain",
+                  "retain_seconds": 3600
+                }
+              }
+            ],
+            "limits": {
+              "bootstrap_seconds": 300,
+              "job_seconds": 3600,
+              "collection_seconds": 300,
+              "max_concurrent_jobs": 1
+            }
+          }
+        },
+        {
+          "reference": {
+            "profile_id": "slurm-a",
+            "revision": 1,
+            "profile_hash": "sha256:39e2f75923a0a9194b9ecf523f7e4127242455853fc268d2302bbbda97ece7cb",
+            "definition_hash": "sha256:451c5bebd68cfd3417726caad11b0659376ab08ab903f4c6ff6482301ffd4983"
+          },
+          "kind": "slurm",
+          "allowed_roots": [
+            "/data"
+          ]
+        }
+      ],
+      "routes": [
+        {
+          "route_id": "input",
+          "source_executor_key": "s3",
+          "destination_executor_key": "local-a",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/local/"
+        },
+        {
+          "route_id": "prepare-align",
+          "source_executor_key": "local-a",
+          "destination_executor_key": "ec2-managed",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/local/"
+        },
+        {
+          "route_id": "align-count",
+          "source_executor_key": "ec2-managed",
+          "destination_executor_key": "ec2-existing",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/managed/"
+        },
+        {
+          "route_id": "count-report",
+          "source_executor_key": "ec2-existing",
+          "destination_executor_key": "slurm-a",
+          "worker_queue": "transfer-a",
+          "staging_prefix": "s3://workbench-example/staging/existing/"
+        }
+      ],
+      "input_prefixes": [
+        "s3://workbench-example/input/"
+      ],
+      "publication_prefixes": [
+        "s3://workbench-example/results/"
+      ]
+    },
+    "managed_direct_credentials": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "compute": {
+        "mode": "managed",
+        "image_id": "ami-0123456789abcdef0",
+        "instance_type": "m6i.large",
+        "subnet_id": "subnet-0123456789abcdef0",
+        "security_group_ids": [
+          "sg-0123456789abcdef0"
+        ],
+        "instance_profile_arn": "arn:aws:iam::123456789012:instance-profile/runner",
+        "retention": {
+          "on_success": "terminate",
+          "on_failure": "retain",
+          "retain_seconds": 3600
+        }
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/managed/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "new",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "delete",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          },
+          "size_gib": 100,
+          "volume_type": "gp3",
+          "encrypted": true
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 2
+      },
+      "controller_auth_mode": "default_chain"
+    },
+    "existing_direct_credentials": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "compute": {
+        "mode": "existing",
+        "instance_id": "i-0123456789abcdef0"
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/existing/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "existing",
+          "volume_id": "vol-0123456789abcdef0",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "retain",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          }
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 1
+      },
+      "controller_auth_mode": "default_chain"
+    },
+    "managed_explicit_assume_role": {
+      "schema": "morphic.aws_ec2_profile/v1",
+      "account_id": "123456789012",
+      "region": "us-west-2",
+      "controller_role_arn": "arn:aws:iam::123456789012:role/workbench",
+      "compute": {
+        "mode": "managed",
+        "image_id": "ami-0123456789abcdef0",
+        "instance_type": "m6i.large",
+        "subnet_id": "subnet-0123456789abcdef0",
+        "security_group_ids": [
+          "sg-0123456789abcdef0"
+        ],
+        "instance_profile_arn": "arn:aws:iam::123456789012:instance-profile/runner",
+        "retention": {
+          "on_success": "terminate",
+          "on_failure": "retain",
+          "retain_seconds": 3600
+        }
+      },
+      "runtime": {
+        "os": "linux",
+        "architecture": "x86_64",
+        "manifest_hash": "sha256:2d52cd9073053426a522ce4fb85745902ca2f9482e61774b7c1fa6c44a68931d",
+        "runner_hash": "sha256:4c5ce8b1f6e1e3777a041caf8e871504fc018272b4fd058ddfabcb5c401b8a65"
+      },
+      "s3": {
+        "input_prefixes": [
+          "s3://workbench-example/input/",
+          "s3://workbench-example/staging/"
+        ],
+        "output_prefix": "s3://workbench-example/staging/managed/",
+        "encryption": "AES256"
+      },
+      "volumes": [
+        {
+          "mode": "new",
+          "mount_path": "/work",
+          "read_only": false,
+          "retention": {
+            "on_success": "delete",
+            "on_failure": "retain",
+            "retain_seconds": 3600
+          },
+          "size_gib": 100,
+          "volume_type": "gp3",
+          "encrypted": true
+        }
+      ],
+      "limits": {
+        "bootstrap_seconds": 300,
+        "job_seconds": 3600,
+        "collection_seconds": 300,
+        "max_concurrent_jobs": 2
+      },
+      "controller_auth_mode": "assume_role"
+    },
+    "manual_checkpoint": {
+      "schema": "morphic.execution_plan/v1",
+      "identity": {
+        "owner_id": "owner-1",
+        "workbench_run_id": "run-1",
+        "request_id": "request-1",
+        "workflow_id": "workflow-1",
+        "attempt": 1
+      },
+      "graph_hash": "sha256:3bc9159414cdaeda51f5f475f0a3ae4ed3e32f155e48a2271298f15b7945f298",
+      "params_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "bundle_hash": "sha256:4c522949265daa3973b2389b594a235b5c6e47c70d2af6e23bd14f8173f56280",
+      "placement": {
+        "schema": "morphic.execution_placement/v1",
+        "nodes": [
+          {
+            "node_id": "prepare",
+            "executor_key": "local-a",
+            "kind": "temporal_worker",
+            "profile": {
+              "profile_id": "local-a",
+              "revision": 1,
+              "profile_hash": "sha256:78a5913f2c2fda6d8ef6bca76f2a7ec8ff1526843e45ddd2ebbf71e3b4916815",
+              "definition_hash": "sha256:78740ec2050f0eb18e5c9a33b2150e82a59872cc4fd1a72e48bd0343a006bbb5"
+            },
+            "depends_on": []
+          },
+          {
+            "node_id": "align",
+            "executor_key": "ec2-managed",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-managed",
+              "revision": 1,
+              "profile_hash": "sha256:ce607130eb28449b3d6999c655fc9f5e17e8e81f15e03ba2f815df5cd8fa75ca",
+              "definition_hash": "sha256:f1abb9c7b3550a87f264567fae7758e95ec5f073f6f319687a6e012f999044fa"
+            },
+            "depends_on": [
+              "prepare"
+            ]
+          },
+          {
+            "node_id": "count",
+            "executor_key": "ec2-existing",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-existing",
+              "revision": 1,
+              "profile_hash": "sha256:d73b1840dd272be68206a5041193c12550d60e7bf4ade7d5205de04359697fb8",
+              "definition_hash": "sha256:86af327d439771a666d001af8b4cb6be9db4625bb6957b28b624c63035907422"
+            },
+            "depends_on": [
+              "align"
+            ]
+          },
+          {
+            "node_id": "report",
+            "executor_key": "slurm-a",
+            "kind": "slurm",
+            "profile": {
+              "profile_id": "slurm-a",
+              "revision": 1,
+              "profile_hash": "sha256:39e2f75923a0a9194b9ecf523f7e4127242455853fc268d2302bbbda97ece7cb",
+              "definition_hash": "sha256:451c5bebd68cfd3417726caad11b0659376ab08ab903f4c6ff6482301ffd4983"
+            },
+            "depends_on": [
+              "count"
+            ]
+          }
+        ]
+      },
+      "storage": {
+        "schema": "morphic.storage_plan/v1",
+        "artifacts": [
+          {
+            "artifact_id": "reads",
+            "source": {
+              "kind": "s3",
+              "uri": "s3://workbench-example/input/reads.fastq",
+              "sha256": "sha256:abf10a0d647457a2d27c9007f46ad3e87870c03ff6b7a492968131e48bb87cc7",
+              "size_bytes": 1024
+            }
+          },
+          {
+            "artifact_id": "prepare-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "prepare",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "align-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "align",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "count-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "count",
+              "path": "out/result"
+            }
+          }
+        ],
+        "routes": [
+          {
+            "route_id": "input",
+            "source_executor_key": "s3",
+            "destination_executor_key": "local-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "prepare-align",
+            "source_executor_key": "local-a",
+            "destination_executor_key": "ec2-managed",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "align-count",
+            "source_executor_key": "ec2-managed",
+            "destination_executor_key": "ec2-existing",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/managed/"
+          },
+          {
+            "route_id": "count-report",
+            "source_executor_key": "ec2-existing",
+            "destination_executor_key": "slurm-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/existing/"
+          }
+        ],
+        "transfers": [
+          {
+            "artifact_id": "reads",
+            "to_node": "prepare",
+            "target_path": "in/data",
+            "route_id": "input"
+          },
+          {
+            "artifact_id": "prepare-out",
+            "to_node": "align",
+            "target_path": "in/data",
+            "route_id": "prepare-align"
+          },
+          {
+            "artifact_id": "align-out",
+            "to_node": "count",
+            "target_path": "in/data",
+            "route_id": "align-count"
+          },
+          {
+            "artifact_id": "count-out",
+            "to_node": "report",
+            "target_path": "in/data",
+            "route_id": "count-report"
+          }
+        ],
+        "publications": [
+          {
+            "node_id": "report",
+            "path": "out/report",
+            "destination_prefix": "s3://workbench-example/results/run-1/"
+          }
+        ]
+      },
+      "review": {
+        "interaction_id": "review-1",
+        "revision": 1,
+        "response_id": "response-1",
+        "state_hash": "sha256:1d1a032fb02940ed71cf892ec6860163003f9bab59ed997df7d22e22f57cc8d7",
+        "approval_evidence_hash": "sha256:e08ea766d3f98deebe47d0faef1d2a614f3af8f4ab14ea438b8b0db4d1cd3584"
+      },
+      "checkpoints": [
+        {
+          "checkpoint_id": "pilot",
+          "description": "QC must succeed and publish evidence before full alignment",
+          "after_nodes": [
+            "prepare"
+          ],
+          "before_nodes": [
+            "align"
+          ],
+          "mode": "manual",
+          "review_timeout_seconds": 3600
+        }
+      ]
+    },
+    "automatic_checkpoint": {
+      "schema": "morphic.execution_plan/v1",
+      "identity": {
+        "owner_id": "owner-1",
+        "workbench_run_id": "run-1",
+        "request_id": "request-1",
+        "workflow_id": "workflow-1",
+        "attempt": 1
+      },
+      "graph_hash": "sha256:3bc9159414cdaeda51f5f475f0a3ae4ed3e32f155e48a2271298f15b7945f298",
+      "params_hash": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "bundle_hash": "sha256:4c522949265daa3973b2389b594a235b5c6e47c70d2af6e23bd14f8173f56280",
+      "placement": {
+        "schema": "morphic.execution_placement/v1",
+        "nodes": [
+          {
+            "node_id": "prepare",
+            "executor_key": "local-a",
+            "kind": "temporal_worker",
+            "profile": {
+              "profile_id": "local-a",
+              "revision": 1,
+              "profile_hash": "sha256:78a5913f2c2fda6d8ef6bca76f2a7ec8ff1526843e45ddd2ebbf71e3b4916815",
+              "definition_hash": "sha256:78740ec2050f0eb18e5c9a33b2150e82a59872cc4fd1a72e48bd0343a006bbb5"
+            },
+            "depends_on": []
+          },
+          {
+            "node_id": "align",
+            "executor_key": "ec2-managed",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-managed",
+              "revision": 1,
+              "profile_hash": "sha256:ce607130eb28449b3d6999c655fc9f5e17e8e81f15e03ba2f815df5cd8fa75ca",
+              "definition_hash": "sha256:f1abb9c7b3550a87f264567fae7758e95ec5f073f6f319687a6e012f999044fa"
+            },
+            "depends_on": [
+              "prepare"
+            ]
+          },
+          {
+            "node_id": "count",
+            "executor_key": "ec2-existing",
+            "kind": "aws_ec2",
+            "profile": {
+              "profile_id": "ec2-existing",
+              "revision": 1,
+              "profile_hash": "sha256:d73b1840dd272be68206a5041193c12550d60e7bf4ade7d5205de04359697fb8",
+              "definition_hash": "sha256:86af327d439771a666d001af8b4cb6be9db4625bb6957b28b624c63035907422"
+            },
+            "depends_on": [
+              "align"
+            ]
+          },
+          {
+            "node_id": "report",
+            "executor_key": "slurm-a",
+            "kind": "slurm",
+            "profile": {
+              "profile_id": "slurm-a",
+              "revision": 1,
+              "profile_hash": "sha256:39e2f75923a0a9194b9ecf523f7e4127242455853fc268d2302bbbda97ece7cb",
+              "definition_hash": "sha256:451c5bebd68cfd3417726caad11b0659376ab08ab903f4c6ff6482301ffd4983"
+            },
+            "depends_on": [
+              "count"
+            ]
+          }
+        ]
+      },
+      "storage": {
+        "schema": "morphic.storage_plan/v1",
+        "artifacts": [
+          {
+            "artifact_id": "reads",
+            "source": {
+              "kind": "s3",
+              "uri": "s3://workbench-example/input/reads.fastq",
+              "sha256": "sha256:abf10a0d647457a2d27c9007f46ad3e87870c03ff6b7a492968131e48bb87cc7",
+              "size_bytes": 1024
+            }
+          },
+          {
+            "artifact_id": "prepare-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "prepare",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "align-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "align",
+              "path": "out/result"
+            }
+          },
+          {
+            "artifact_id": "count-out",
+            "source": {
+              "kind": "stage_output",
+              "node_id": "count",
+              "path": "out/result"
+            }
+          }
+        ],
+        "routes": [
+          {
+            "route_id": "input",
+            "source_executor_key": "s3",
+            "destination_executor_key": "local-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "prepare-align",
+            "source_executor_key": "local-a",
+            "destination_executor_key": "ec2-managed",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/local/"
+          },
+          {
+            "route_id": "align-count",
+            "source_executor_key": "ec2-managed",
+            "destination_executor_key": "ec2-existing",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/managed/"
+          },
+          {
+            "route_id": "count-report",
+            "source_executor_key": "ec2-existing",
+            "destination_executor_key": "slurm-a",
+            "worker_queue": "transfer-a",
+            "staging_prefix": "s3://workbench-example/staging/existing/"
+          }
+        ],
+        "transfers": [
+          {
+            "artifact_id": "reads",
+            "to_node": "prepare",
+            "target_path": "in/data",
+            "route_id": "input"
+          },
+          {
+            "artifact_id": "prepare-out",
+            "to_node": "align",
+            "target_path": "in/data",
+            "route_id": "prepare-align"
+          },
+          {
+            "artifact_id": "align-out",
+            "to_node": "count",
+            "target_path": "in/data",
+            "route_id": "align-count"
+          },
+          {
+            "artifact_id": "count-out",
+            "to_node": "report",
+            "target_path": "in/data",
+            "route_id": "count-report"
+          }
+        ],
+        "publications": [
+          {
+            "node_id": "report",
+            "path": "out/report",
+            "destination_prefix": "s3://workbench-example/results/run-1/"
+          }
+        ]
+      },
+      "review": {
+        "interaction_id": "review-1",
+        "revision": 1,
+        "response_id": "response-1",
+        "state_hash": "sha256:bb5943ab29df5bf485fabd973a11ab5cf7b6cac79f0f04f735443a7cd5db2669",
+        "approval_evidence_hash": "sha256:e08ea766d3f98deebe47d0faef1d2a614f3af8f4ab14ea438b8b0db4d1cd3584"
+      },
+      "checkpoints": [
+        {
+          "checkpoint_id": "pilot",
+          "description": "QC must succeed and publish evidence before full alignment",
+          "after_nodes": [
+            "prepare"
+          ],
+          "before_nodes": [
+            "align"
+          ],
+          "mode": "automatic"
+        }
+      ]
+    }
+  },
+  "invalid": [
+    {
+      "name": "mixed-compute",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/compute/instance_id",
+          "value": "i-0123456789abcdef0"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "untyped-secret",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/access_key",
+          "value": "nope"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "unknown-profile-field",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/extra",
+          "value": true
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "invalid-resource-id",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/compute/image_id",
+          "value": "ami-012345678"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "wrong-role-account",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/controller_role_arn",
+          "value": "arn:aws:iam::999999999999:role/other"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "wrong-instance-profile-account",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/compute/instance_profile_arn",
+          "value": "arn:aws:iam::999999999999:instance-profile/other"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "missing-kms-key",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/s3/encryption",
+          "value": "aws:kms"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "unexpected-kms-key",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/s3/kms_key_arn",
+          "value": "arn:aws:kms:us-west-2:123456789012:key/example"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "bad-kms-region",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes/0/kms_key_arn",
+          "value": "arn:aws:kms:us-east-1:123456789012:key/example"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "unencrypted-ebs",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes/0/encrypted",
+          "value": false
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "readonly-workspace",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes/0/read_only",
+          "value": true
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "delete-user-volume",
+      "base": "existing",
+      "changes": [
+        {
+          "path": "/volumes/0/retention/on_success",
+          "value": "delete"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "parallel-existing-instance",
+      "base": "existing",
+      "changes": [
+        {
+          "path": "/limits/max_concurrent_jobs",
+          "value": 2
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "mounted-on-managed",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes",
+          "value": [
+            {
+              "mode": "mounted",
+              "volume_id": "vol-0123456789abcdef0",
+              "mount_path": "/work",
+              "read_only": false,
+              "retention": {
+                "on_success": "retain",
+                "on_failure": "retain",
+                "retain_seconds": 3600
+              }
+            }
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "overlapping-mounts",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes",
+          "value": [
+            {
+              "mode": "new",
+              "mount_path": "/work",
+              "read_only": false,
+              "retention": {
+                "on_success": "delete",
+                "on_failure": "retain",
+                "retain_seconds": 3600
+              },
+              "size_gib": 100,
+              "volume_type": "gp3",
+              "encrypted": true
+            },
+            {
+              "mode": "new",
+              "mount_path": "/work/cache",
+              "read_only": false,
+              "retention": {
+                "on_success": "delete",
+                "on_failure": "retain",
+                "retain_seconds": 3600
+              },
+              "size_gib": 100,
+              "volume_type": "gp3",
+              "encrypted": true
+            }
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "mount-traversal",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes/0/mount_path",
+          "value": "/work/../etc"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "s3-traversal",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/s3/output_prefix",
+          "value": "s3://workbench-example/a/../b/"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "non-prefix-s3",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/s3/output_prefix",
+          "value": "s3://workbench-example/staging"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "missing-dependency",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/1/depends_on",
+          "value": [
+            "absent"
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "cycle",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/0/depends_on",
+          "value": [
+            "report"
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "duplicate-node",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/1/node_id",
+          "value": "prepare"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "conflicting-executor-key",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/2/executor_key",
+          "value": "ec2-managed"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "conflicting-profile-pin",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/2/profile/profile_id",
+          "value": "ec2-managed"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "reserved-executor",
+      "base": "placement",
+      "changes": [
+        {
+          "path": "/nodes/0/executor_key",
+          "value": "s3"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "duplicate-artifact",
+      "base": "storage",
+      "changes": [
+        {
+          "path": "/artifacts/1/artifact_id",
+          "value": "reads"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "target-traversal",
+      "base": "storage",
+      "changes": [
+        {
+          "path": "/transfers/0/target_path",
+          "value": "in/../out"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "unknown-route",
+      "base": "storage",
+      "changes": [
+        {
+          "path": "/transfers/0/route_id",
+          "value": "absent"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "overlapping-targets",
+      "base": "storage",
+      "changes": [
+        {
+          "path": "/transfers",
+          "value": [
+            {
+              "artifact_id": "reads",
+              "to_node": "prepare",
+              "target_path": "in/data",
+              "route_id": "input"
+            },
+            {
+              "artifact_id": "prepare-out",
+              "to_node": "align",
+              "target_path": "in/data",
+              "route_id": "prepare-align"
+            },
+            {
+              "artifact_id": "align-out",
+              "to_node": "count",
+              "target_path": "in/data",
+              "route_id": "align-count"
+            },
+            {
+              "artifact_id": "count-out",
+              "to_node": "report",
+              "target_path": "in/data",
+              "route_id": "count-report"
+            },
+            {
+              "artifact_id": "reads",
+              "to_node": "prepare",
+              "target_path": "in/data/child",
+              "route_id": "input"
+            }
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "unknown-producer",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/artifacts/1/source/node_id",
+          "value": "absent"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": true
+    },
+    {
+      "name": "producer-not-dependency",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/placement/nodes/1/depends_on",
+          "value": []
+        }
+      ],
+      "authorize": false,
+      "refresh_review": true
+    },
+    {
+      "name": "route-endpoint-mismatch",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/routes/1/destination_executor_key",
+          "value": "ec2-existing"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": true
+    },
+    {
+      "name": "stale-graph-review",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/graph_hash",
+          "value": "sha256:9abf9994927acc503ec87e4433239aee75bb937357616bf8cca0290a1f3aa60a"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "stale-profile-review",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/placement/nodes/1/profile/revision",
+          "value": 2
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "forged-profile-pin",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/placement/nodes/1/profile/profile_hash",
+          "value": "sha256:54ac473799bba8e885f11f81fc263afccb1bde2fc85e4828f1f74b35de527c01"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true
+    },
+    {
+      "name": "unapproved-queue",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/routes/0/worker_queue",
+          "value": "other"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true
+    },
+    {
+      "name": "unapproved-input",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/artifacts/0/source/uri",
+          "value": "s3://workbench-example/input-other/reads"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true
+    },
+    {
+      "name": "unapproved-output",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/publications/0/destination_prefix",
+          "value": "s3://workbench-example/results-other/"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true
+    },
+    {
+      "name": "unapproved-server-root",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/artifacts/0/source",
+          "value": {
+            "kind": "server_file",
+            "executor_key": "local-a",
+            "path": "/etc/passwd",
+            "sha256": "sha256:ba2df4903a2c14e86dc3bcca58911b44ac1d2514b7227bf6eb08cfb978f55a1b",
+            "size_bytes": 1
+          }
+        },
+        {
+          "path": "/storage/routes/0/source_executor_key",
+          "value": "local-a"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true,
+      "policy_changes": [
+        {
+          "path": "/routes/0/source_executor_key",
+          "value": "local-a"
+        }
+      ]
+    },
+    {
+      "name": "missing-aws-policy",
+      "base": "policy",
+      "changes": [
+        {
+          "path": "/profiles/1/kind",
+          "value": "slurm"
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "parallel-reused-volume",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/volumes",
+          "value": [
+            {
+              "mode": "existing",
+              "volume_id": "vol-0123456789abcdef0",
+              "mount_path": "/work",
+              "read_only": false,
+              "retention": {
+                "on_success": "retain",
+                "on_failure": "retain",
+                "retain_seconds": 3600
+              }
+            }
+          ]
+        }
+      ],
+      "authorize": false,
+      "refresh_review": false
+    },
+    {
+      "name": "ebs-staging-policy",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/artifacts/0/source",
+          "value": {
+            "kind": "ebs_path",
+            "executor_key": "ec2-existing",
+            "path": "/work/data",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size_bytes": 1
+          }
+        },
+        {
+          "path": "/storage/routes/0/source_executor_key",
+          "value": "ec2-existing"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true,
+      "policy_changes": [
+        {
+          "path": "/routes/0/source_executor_key",
+          "value": "ec2-existing"
+        }
+      ]
+    },
+    {
+      "name": "ebs-root-policy",
+      "base": "hybrid",
+      "changes": [
+        {
+          "path": "/storage/artifacts/0/source",
+          "value": {
+            "kind": "ebs_path",
+            "executor_key": "ec2-existing",
+            "path": "/etc/passwd",
+            "sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "size_bytes": 1
+          }
+        },
+        {
+          "path": "/storage/routes/0/source_executor_key",
+          "value": "ec2-existing"
+        }
+      ],
+      "authorize": true,
+      "refresh_review": true,
+      "policy_changes": [
+        {
+          "path": "/routes/0/source_executor_key",
+          "value": "ec2-existing"
+        }
+      ]
+    },
+    {
+      "name": "direct_mode_cannot_name_role",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/controller_auth_mode",
+          "value": "default_chain"
+        }
+      ],
+      "refresh_review": false,
+      "authorize": false
+    },
+    {
+      "name": "assume_role_requires_role",
+      "base": "managed_direct_credentials",
+      "changes": [
+        {
+          "path": "/controller_auth_mode",
+          "value": "assume_role"
+        }
+      ],
+      "refresh_review": false,
+      "authorize": false
+    },
+    {
+      "name": "unknown_auth_mode",
+      "base": "managed",
+      "changes": [
+        {
+          "path": "/controller_auth_mode",
+          "value": "unknown"
+        }
+      ],
+      "refresh_review": false,
+      "authorize": false
+    },
+    {
+      "name": "profile_name_is_not_request_configuration",
+      "base": "managed_direct_credentials",
+      "changes": [
+        {
+          "path": "/aws_profile",
+          "value": "uw"
+        }
+      ],
+      "refresh_review": false,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_unknown_node",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/after_nodes",
+          "value": [
+            "missing"
+          ]
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_milestone_after_consumer",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/after_nodes",
+          "value": [
+            "report"
+          ]
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_self_deadlock",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/after_nodes",
+          "value": [
+            "align"
+          ]
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_unknown_mode",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/mode",
+          "value": "approve_by_default"
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_duplicate",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints",
+          "value": [
+            {
+              "checkpoint_id": "pilot",
+              "description": "QC must succeed and publish evidence before full alignment",
+              "after_nodes": [
+                "prepare"
+              ],
+              "before_nodes": [
+                "align"
+              ],
+              "mode": "manual",
+              "review_timeout_seconds": 3600
+            },
+            {
+              "checkpoint_id": "pilot",
+              "description": "QC must succeed and publish evidence before full alignment",
+              "after_nodes": [
+                "prepare"
+              ],
+              "before_nodes": [
+                "align"
+              ],
+              "mode": "manual",
+              "review_timeout_seconds": 3600
+            }
+          ]
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_zero_timeout",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/review_timeout_seconds",
+          "value": 0
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_manual_missing_timeout",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints",
+          "value": [
+            {
+              "checkpoint_id": "pilot",
+              "description": "QC must succeed and publish evidence before full alignment",
+              "after_nodes": [
+                "prepare"
+              ],
+              "before_nodes": [
+                "align"
+              ],
+              "mode": "manual"
+            }
+          ]
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_unbounded_timeout",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/review_timeout_seconds",
+          "value": 2592001
+        }
+      ],
+      "refresh_review": true,
+      "authorize": false
+    },
+    {
+      "name": "checkpoint_edit_invalidates_review",
+      "base": "manual_checkpoint",
+      "changes": [
+        {
+          "path": "/checkpoints/0/description",
+          "value": "changed conditions"
+        }
+      ],
+      "refresh_review": false,
+      "authorize": false
+    }
+  ],
+  "canonical": [
+    {
+      "value": {},
+      "sha256": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "value": {
+        "z": [
+          -1,
+          0,
+          9007199254740991,
+          true,
+          false,
+          null
+        ],
+        "a": "<&> / \u00e9\ud83d\ude00\n\t\u0000\u007f"
+      },
+      "sha256": "sha256:736328b42aa66fc0e370c0c2aff105cb25d0335aa70b8eb0037da87e1bf52f91"
+    },
+    {
+      "value": {
+        "\ud83d\ude00": "astral",
+        "\u00e9": "accent",
+        "a": "ascii"
+      },
+      "sha256": "sha256:451e4bb11eb5a87b47e0b589b1d7188c79a7b9d29eadcfa6ced84f2160d37caf"
+    }
+  ],
+  "execution_ids": {
+    "parent_workflow_id": "workflow-1",
+    "node_id": "align",
+    "command_id": "cmd-1",
+    "attempt": 1,
+    "node_workflow_id": "node-4d7255108a4663ee07a4e58c076f1aa84d366bd4c0f8a086e03405c0282f3fa9",
+    "command_key": "command-b0335641229f8409c59250041be9c643d8d130f188661a0fc9acaa8cdfab73be"
+  },
+  "submission_fingerprint": "sha256:d5efee16c173b741a3635cd9e793134a793de9db85772c8886a92be868ad175d",
+  "invalid_json": [
+    "{\"schema\":\"a\",\"schema\":\"b\"}",
+    "{\"x\":1.0}",
+    "{\"x\":1e1}",
+    "{\"x\":9007199254740992}",
+    "{\"x\":\"\\ud800\"}",
+    "{} {}"
+  ]
+}
